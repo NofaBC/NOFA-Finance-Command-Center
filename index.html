@@ -2117,11 +2117,20 @@ var ACTIONS = {
   'cancel-reset': function () { state.confirmReset = false; render(false); }
 };
 
+function reportUiError(context, err) {
+  console.error(context, err);
+  var b = $id('errbar');
+  if (b) { b.style.display = 'flex'; b.querySelector('span').textContent = 'Error: ' + (err && err.message ? err.message : context); }
+}
 document.addEventListener('click', function (e) {
   var t = e.target.closest ? e.target.closest('[data-action]') : null;
   if (!t) return;
   var fn = ACTIONS[t.getAttribute('data-action')];
-  if (fn) { e.preventDefault(); fn(t.dataset, t, e); }
+  if (fn) {
+    e.preventDefault();
+    try { fn(t.dataset, t, e); }
+    catch (err) { reportUiError('Action "' + t.getAttribute('data-action') + '" failed', err); }
+  }
 });
 
 document.addEventListener('input', function (e) {
@@ -2133,6 +2142,7 @@ document.addEventListener('submit', function (e) {
   var f = e.target.closest ? e.target.closest('[data-form]') : null;
   if (!f) return;
   e.preventDefault();
+  try {
   var data = {};
   new FormData(f).forEach(function (v, k) { data[k] = v; });
   var num = function (v) { return parseFloat(String(v).replace(/[^0-9.\-]/g, '')) || 0; };
@@ -2243,6 +2253,7 @@ document.addEventListener('submit', function (e) {
     state.store.goals.push({ id: 'g' + Date.now(), name: name, short: name.split(' ').slice(0, 2).join(' '), current: num(data.current), target: num(data.target) || 1, note: (data.note || '').trim() || 'Custom target', color: ['brand', 'grape', 'amber', 'teal'][state.store.goals.length % 4], mode: 'save' });
     persist(); toast('Goal \u201c' + esc(name) + '\u201d added'); closeModal(); render(false);
   }
+  } catch (err) { reportUiError('Saving "' + f.getAttribute('data-form') + '" failed', err); }
 });
 
 document.addEventListener('keydown', function (e) {
