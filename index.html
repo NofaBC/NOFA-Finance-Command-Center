@@ -2125,6 +2125,16 @@ function reportUiError(context, err) {
 document.addEventListener('click', function (e) {
   var t = e.target.closest ? e.target.closest('[data-action]') : null;
   if (!t) return;
+  /* Respect data-stop boundaries (e.g. the modal box in modalShell()).
+     Any click that starts inside a data-stop container must not trigger
+     a data-action belonging to an ANCESTOR of that container (like the
+     modal-backdrop's close-modal) -- only data-action elements that are
+     inside (or are) the stop boundary itself may fire. This keeps clicks
+     on inputs/labels/selects/plain space inside a modal from bubbling out
+     and closing it, while clicking the backdrop itself, the X button, or
+     Cancel (all inside or at the boundary) still works. */
+  var stopBoundary = e.target.closest ? e.target.closest('[data-stop]') : null;
+  if (stopBoundary && !stopBoundary.contains(t)) return;
   var fn = ACTIONS[t.getAttribute('data-action')];
   if (fn) {
     e.preventDefault();
