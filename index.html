@@ -588,7 +588,16 @@ var MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov',
 var WEEKDAYS = ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'];
 /* Phase 1A: the app clock is the real device date (previously a frozen demo
    date). Recurring due-days, obligations and the Known Forecast now advance
-   automatically as real time passes. */
+   automatically as real time passes.
+   IMPORTANT: `new Date()` with no arguments always resolves to the client
+   device/browser's LOCAL timezone (never UTC). Every "today"/"next X days"
+   calculation in this file (home hero date, forecast, reports, balance
+   snapshots, obligations) is derived from todayBase()/todayISO() below, or
+   from local Date getters (getFullYear/getMonth/getDate/getDay/getHours).
+   Do not introduce getUTC*() methods, Date.UTC(), or toISOString()-based
+   date-only comparisons here — those are UTC and would drift by a day near
+   midnight depending on the user's timezone. toISOString() is only used
+   for createdAt/updatedAt audit timestamps, never for "today" display. */
 function todayBase() { var d = new Date(); d.setHours(0, 0, 0, 0); return d; }
 function pad2(n) { return (n < 10 ? '0' : '') + n; }
 function isoOf(d) { return d.getFullYear() + '-' + pad2(d.getMonth() + 1) + '-' + pad2(d.getDate()); }
