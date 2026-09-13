@@ -349,7 +349,7 @@ svg{display:block}
 .stat .sv.pos{color:var(--l600)}.stat .sv.neg{color:var(--c600)}
 .splitbar{height:12px;border-radius:999px;overflow:hidden;display:flex;background:rgba(231,235,241,.7)}
 .splitbar .sb{transition:width .7s var(--ease)}
-.splitbar .sb.b{background:var(--b500)}.splitbar .sb.g{background:var(--g500)}
+.splitbar .sb.b{background:var(--b500)}.splitbar .sb.g{background:var(--g500)}.splitbar .sb.a{background:#E8A23D}
 .hbar{height:10px;border-radius:999px;background:var(--line);overflow:hidden}
 .hbar i{display:block;height:100%;border-radius:999px;background:var(--b500)}
 .lrow{display:flex;align-items:center;gap:12px}
@@ -683,14 +683,19 @@ function logoSVG(s) {
    dashboard displays now lives in state.store and is user-editable.
 ================================================================ */
 var STORE_KEY = 'nofa-prototype-v1';
+/* Financial Truth Phase A: three account entities exist, not two.
+   'business' = NOFA (currently exactly one account). 'personal' = Farhad's
+   personal account(s). 'other_business' = a separate business (e.g. the
+   Business Market Rate Savings account below) that is NOT NOFA and must
+   never be treated as NOFA cash. */
 var SEED = {
-  v: 4,
+  v: 5,
   profile: { name: 'Farhad', initials: 'FN' },
   settings: { weeklySummary: true, billReminders: true, reserveAlerts: true, showBanner: true },
   accounts: [
-    { id:'a1', name:'NOFA Business Checking', entity:'business', type:'Business Checking', balance:4358.68, spark:[42,45,44,47,46,49,48,51,50,53], archived:false },
-    { id:'a2', name:'Personal Checking', entity:'personal', type:'Everyday Checking', balance:466.46, spark:[38,35,33,30,31,28,30,27,28,26], archived:false },
-    { id:'a3', name:'Business Market Rate Savings', entity:'business', type:'Business Savings', balance:1.45, spark:[1,1,1,1,1,1,1,1,1,1], archived:false }
+    { id:'a1', name:'NOFA Business Checking', entity:'business', type:'Business Checking', balance:4358.68, spark:[42,45,44,47,46,49,48,51,50,53], archived:false, lastReconciledAt:null },
+    { id:'a2', name:'Personal Checking', entity:'personal', type:'Everyday Checking', balance:466.46, spark:[38,35,33,30,31,28,30,27,28,26], archived:false, lastReconciledAt:null },
+    { id:'a3', name:'Business Market Rate Savings', entity:'other_business', type:'Business Savings', balance:1.45, spark:[1,1,1,1,1,1,1,1,1,1], archived:false, lastReconciledAt:null }
   ],
   goals: [
     { id:'g1', name:'NOFA Protected Reserve', short:'NOFA Reserve', current:3626.29, target:4000, note:'Business cash minus planned owner withdrawals not yet executed', color:'brand', mode:'save' },
@@ -704,38 +709,46 @@ var SEED = {
     { id:'i3', name:'Existing Client', display:'$47.95', cadence:'Monthly net cash', cadenceDays:30, amount:47.95, entity:'business', cashStatus:'confirmed', nextDate:'2026-10-01', note:'$50 gross less $2.05 processing fee', status:'active' },
     { id:'i4', name:'New Client', display:'Needed', cadence:'Priority: next 30 days', cadenceDays:null, amount:0, entity:'business', cashStatus:'pipeline', nextDate:null, note:'Target: setup fee + recurring monthly revenue — pipeline, not spendable cash', status:'planned' }
   ],
+  /* All seeded transactions below predate this engine and are already
+     reflected in the seeded account balances above -- exactly like a
+     reconciliation baseline. They must never be (re)applied, matching
+     what the migration does for a real user's pre-existing data. */
   transactions: [
-    { id:'tx-001', accountId:'a1', date:'2026-09-11', name:'Hugging Face', amount:-6.13, status:'posted', entity:'business', category:'AI development / research', expenseType:'', clientProject:'', source:'manual', notes:'', icon:'sparkle', createdAt:'2026-09-11T12:00:00.000Z', updatedAt:'2026-09-11T12:00:00.000Z' },
-    { id:'tx-002', accountId:'a1', date:'2026-09-11', name:'ElevenLabs', amount:-23.32, status:'posted', entity:'business', category:'Recurring AI / voice', expenseType:'', clientProject:'', source:'manual', notes:'', icon:'zap', createdAt:'2026-09-11T12:00:00.000Z', updatedAt:'2026-09-11T12:00:00.000Z' },
-    { id:'tx-003', accountId:'a2', date:'2026-09-10', name:'Continental Finance', amount:-82.00, status:'posted', entity:'personal', category:'Credit card payment', expenseType:'', clientProject:'', source:'manual', notes:'', icon:'card', createdAt:'2026-09-10T12:00:00.000Z', updatedAt:'2026-09-10T12:00:00.000Z' },
-    { id:'tx-004', accountId:'a1', date:'2026-09-09', name:'Alignable', amount:-31.80, status:'posted', entity:'business', category:'Networking / operating', expenseType:'', clientProject:'', source:'manual', notes:'', icon:'briefcase', createdAt:'2026-09-09T12:00:00.000Z', updatedAt:'2026-09-09T12:00:00.000Z' },
-    { id:'tx-005', accountId:'a1', date:'2026-09-09', name:'Warp.dev', amount:-10.00, status:'posted', entity:'business', category:'AI development', expenseType:'', clientProject:'', source:'manual', notes:'', icon:'zap', createdAt:'2026-09-09T12:00:00.000Z', updatedAt:'2026-09-09T12:00:00.000Z' },
-    { id:'tx-006', accountId:'a2', date:'2026-09-09', name:'Aspire MC', amount:-50.00, status:'posted', entity:'personal', category:'Credit card payment', expenseType:'', clientProject:'', source:'manual', notes:'', icon:'card', createdAt:'2026-09-09T12:00:00.000Z', updatedAt:'2026-09-09T12:00:00.000Z' },
-    { id:'tx-007', accountId:'a2', date:'2026-09-09', name:'Credit One Bank', amount:-20.00, status:'posted', entity:'personal', category:'Credit card payment', expenseType:'', clientProject:'', source:'manual', notes:'', icon:'card', createdAt:'2026-09-09T12:00:00.000Z', updatedAt:'2026-09-09T12:00:00.000Z' },
-    { id:'tx-008', accountId:'a2', date:'2026-09-09', name:'Kaiser', amount:-75.00, status:'posted', entity:'personal', category:'Health', expenseType:'', clientProject:'', source:'manual', notes:'', icon:'heart', createdAt:'2026-09-09T12:00:00.000Z', updatedAt:'2026-09-09T12:00:00.000Z' },
-    { id:'tx-009', accountId:'a1', date:'2026-09-08', name:'Warp.dev', amount:-20.00, status:'posted', entity:'business', category:'AI development', expenseType:'', clientProject:'', source:'manual', notes:'', icon:'zap', createdAt:'2026-09-08T12:00:00.000Z', updatedAt:'2026-09-08T12:00:00.000Z' },
-    { id:'tx-010', accountId:'a1', date:'2026-09-08', name:'Opus Pro', amount:-29.87, status:'posted', entity:'business', category:'Operating / video marketing', expenseType:'', clientProject:'', source:'manual', notes:'', icon:'sparkle', createdAt:'2026-09-08T12:00:00.000Z', updatedAt:'2026-09-08T12:00:00.000Z' },
-    { id:'tx-011', accountId:'a1', date:'2026-09-08', name:'Warp.dev', amount:-20.00, status:'posted', entity:'business', category:'AI development', expenseType:'', clientProject:'', source:'manual', notes:'', icon:'zap', createdAt:'2026-09-08T12:00:00.000Z', updatedAt:'2026-09-08T12:00:00.000Z' },
-    { id:'tx-012', accountId:'a2', date:'2026-09-08', name:'Concora Credit Payment', amount:-50.00, status:'posted', entity:'personal', category:'Credit card payment', expenseType:'', clientProject:'', source:'manual', notes:'', icon:'card', createdAt:'2026-09-08T12:00:00.000Z', updatedAt:'2026-09-08T12:00:00.000Z' },
-    { id:'tx-013', accountId:'a2', date:'2026-09-08', name:'Concora Credit Payment', amount:-50.00, status:'posted', entity:'personal', category:'Credit card payment', expenseType:'', clientProject:'', source:'manual', notes:'', icon:'card', createdAt:'2026-09-08T12:00:00.000Z', updatedAt:'2026-09-08T12:00:00.000Z' },
-    { id:'tx-014', accountId:'a2', date:'2026-09-08', name:'Temu', amount:-10.62, status:'posted', entity:'personal', category:'Personal purchase', expenseType:'', clientProject:'', source:'manual', notes:'', icon:'card', createdAt:'2026-09-08T12:00:00.000Z', updatedAt:'2026-09-08T12:00:00.000Z' },
-    { id:'tx-015', accountId:'a2', date:'2026-09-08', name:'Washington Post', amount:-12.72, status:'posted', entity:'personal', category:'Subscription · actual posted amount', expenseType:'', clientProject:'', source:'manual', notes:'', icon:'card', createdAt:'2026-09-08T12:00:00.000Z', updatedAt:'2026-09-08T12:00:00.000Z' },
-    { id:'tx-016', accountId:'a2', date:'2026-09-04', name:'Other Business Income', amount:795.00, status:'posted', entity:'personal', category:'Income', expenseType:'', clientProject:'', source:'manual', notes:'', icon:'banknote', createdAt:'2026-09-04T12:00:00.000Z', updatedAt:'2026-09-04T12:00:00.000Z' },
-    { id:'tx-017', accountId:'a2', date:'2026-09-03', name:'Progressive', amount:-89.07, status:'posted', entity:'personal', category:'Auto insurance · actual posted amount', expenseType:'', clientProject:'', source:'manual', notes:'', icon:'shield', createdAt:'2026-09-03T12:00:00.000Z', updatedAt:'2026-09-03T12:00:00.000Z' },
-    { id:'tx-018', accountId:'a1', date:'2026-09-03', name:'Apple.com / Bill', amount:-4.23, status:'posted', entity:'business', category:'Apple charge · actual posted amount', expenseType:'', clientProject:'', source:'manual', notes:'', icon:'card', createdAt:'2026-09-03T12:00:00.000Z', updatedAt:'2026-09-03T12:00:00.000Z' },
-    { id:'tx-019', accountId:'a1', date:'2026-09-02', name:'AWS', amount:-0.52, status:'posted', entity:'business', category:'Cloud', expenseType:'', clientProject:'', source:'manual', notes:'', icon:'zap', createdAt:'2026-09-02T12:00:00.000Z', updatedAt:'2026-09-02T12:00:00.000Z' },
-    { id:'tx-020', accountId:'a1', date:'2026-09-02', name:'Pinecone', amount:-51.50, status:'posted', entity:'business', category:'AI infrastructure', expenseType:'', clientProject:'', source:'manual', notes:'', icon:'zap', createdAt:'2026-09-02T12:00:00.000Z', updatedAt:'2026-09-02T12:00:00.000Z' },
-    { id:'tx-021', accountId:'a1', date:'2026-09-01', name:'Bon Appétit Phase 1', amount:4500.00, status:'posted', entity:'business', category:'Client setup revenue', expenseType:'', clientProject:'Bon Appétit', source:'manual', notes:'', icon:'briefcase', createdAt:'2026-09-01T12:00:00.000Z', updatedAt:'2026-09-01T12:00:00.000Z' },
-    { id:'tx-022', accountId:'a1', date:'2026-09-01', name:'Existing Client', amount:47.95, status:'posted', entity:'business', category:'Net recurring client cash', expenseType:'', clientProject:'', source:'manual', notes:'', icon:'briefcase', createdAt:'2026-09-01T12:00:00.000Z', updatedAt:'2026-09-01T12:00:00.000Z' }
+    { id:'tx-001', accountId:'a1', date:'2026-09-11', name:'Hugging Face', amount:-6.13, status:'posted', entity:'business', category:'AI development / research', expenseType:'', clientProject:'', source:'manual', notes:'', icon:'sparkle', includedInBalance:true, balanceApplied:false, reconciliationId:null, createdAt:'2026-09-11T12:00:00.000Z', updatedAt:'2026-09-11T12:00:00.000Z' },
+    { id:'tx-002', accountId:'a1', date:'2026-09-11', name:'ElevenLabs', amount:-23.32, status:'posted', entity:'business', category:'Recurring AI / voice', expenseType:'', clientProject:'', source:'manual', notes:'', icon:'zap', includedInBalance:true, balanceApplied:false, reconciliationId:null, createdAt:'2026-09-11T12:00:00.000Z', updatedAt:'2026-09-11T12:00:00.000Z' },
+    { id:'tx-003', accountId:'a2', date:'2026-09-10', name:'Continental Finance', amount:-82.00, status:'posted', entity:'personal', category:'Credit card payment', expenseType:'', clientProject:'', source:'manual', notes:'', icon:'card', includedInBalance:true, balanceApplied:false, reconciliationId:null, createdAt:'2026-09-10T12:00:00.000Z', updatedAt:'2026-09-10T12:00:00.000Z' },
+    { id:'tx-004', accountId:'a1', date:'2026-09-09', name:'Alignable', amount:-31.80, status:'posted', entity:'business', category:'Networking / operating', expenseType:'', clientProject:'', source:'manual', notes:'', icon:'briefcase', includedInBalance:true, balanceApplied:false, reconciliationId:null, createdAt:'2026-09-09T12:00:00.000Z', updatedAt:'2026-09-09T12:00:00.000Z' },
+    { id:'tx-005', accountId:'a1', date:'2026-09-09', name:'Warp.dev', amount:-10.00, status:'posted', entity:'business', category:'AI development', expenseType:'', clientProject:'', source:'manual', notes:'', icon:'zap', includedInBalance:true, balanceApplied:false, reconciliationId:null, createdAt:'2026-09-09T12:00:00.000Z', updatedAt:'2026-09-09T12:00:00.000Z' },
+    { id:'tx-006', accountId:'a2', date:'2026-09-09', name:'Aspire MC', amount:-50.00, status:'posted', entity:'personal', category:'Credit card payment', expenseType:'', clientProject:'', source:'manual', notes:'', icon:'card', includedInBalance:true, balanceApplied:false, reconciliationId:null, createdAt:'2026-09-09T12:00:00.000Z', updatedAt:'2026-09-09T12:00:00.000Z' },
+    { id:'tx-007', accountId:'a2', date:'2026-09-09', name:'Credit One Bank', amount:-20.00, status:'posted', entity:'personal', category:'Credit card payment', expenseType:'', clientProject:'', source:'manual', notes:'', icon:'card', includedInBalance:true, balanceApplied:false, reconciliationId:null, createdAt:'2026-09-09T12:00:00.000Z', updatedAt:'2026-09-09T12:00:00.000Z' },
+    { id:'tx-008', accountId:'a2', date:'2026-09-09', name:'Kaiser', amount:-75.00, status:'posted', entity:'personal', category:'Health', expenseType:'', clientProject:'', source:'manual', notes:'', icon:'heart', includedInBalance:true, balanceApplied:false, reconciliationId:null, createdAt:'2026-09-09T12:00:00.000Z', updatedAt:'2026-09-09T12:00:00.000Z' },
+    { id:'tx-009', accountId:'a1', date:'2026-09-08', name:'Warp.dev', amount:-20.00, status:'posted', entity:'business', category:'AI development', expenseType:'', clientProject:'', source:'manual', notes:'', icon:'zap', includedInBalance:true, balanceApplied:false, reconciliationId:null, createdAt:'2026-09-08T12:00:00.000Z', updatedAt:'2026-09-08T12:00:00.000Z' },
+    { id:'tx-010', accountId:'a1', date:'2026-09-08', name:'Opus Pro', amount:-29.87, status:'posted', entity:'business', category:'Operating / video marketing', expenseType:'', clientProject:'', source:'manual', notes:'', icon:'sparkle', includedInBalance:true, balanceApplied:false, reconciliationId:null, createdAt:'2026-09-08T12:00:00.000Z', updatedAt:'2026-09-08T12:00:00.000Z' },
+    { id:'tx-011', accountId:'a1', date:'2026-09-08', name:'Warp.dev', amount:-20.00, status:'posted', entity:'business', category:'AI development', expenseType:'', clientProject:'', source:'manual', notes:'', icon:'zap', includedInBalance:true, balanceApplied:false, reconciliationId:null, createdAt:'2026-09-08T12:00:00.000Z', updatedAt:'2026-09-08T12:00:00.000Z' },
+    { id:'tx-012', accountId:'a2', date:'2026-09-08', name:'Concora Credit Payment', amount:-50.00, status:'posted', entity:'personal', category:'Credit card payment', expenseType:'', clientProject:'', source:'manual', notes:'', icon:'card', includedInBalance:true, balanceApplied:false, reconciliationId:null, createdAt:'2026-09-08T12:00:00.000Z', updatedAt:'2026-09-08T12:00:00.000Z' },
+    { id:'tx-013', accountId:'a2', date:'2026-09-08', name:'Concora Credit Payment', amount:-50.00, status:'posted', entity:'personal', category:'Credit card payment', expenseType:'', clientProject:'', source:'manual', notes:'', icon:'card', includedInBalance:true, balanceApplied:false, reconciliationId:null, createdAt:'2026-09-08T12:00:00.000Z', updatedAt:'2026-09-08T12:00:00.000Z' },
+    { id:'tx-014', accountId:'a2', date:'2026-09-08', name:'Temu', amount:-10.62, status:'posted', entity:'personal', category:'Personal purchase', expenseType:'', clientProject:'', source:'manual', notes:'', icon:'card', includedInBalance:true, balanceApplied:false, reconciliationId:null, createdAt:'2026-09-08T12:00:00.000Z', updatedAt:'2026-09-08T12:00:00.000Z' },
+    { id:'tx-015', accountId:'a2', date:'2026-09-08', name:'Washington Post', amount:-12.72, status:'posted', entity:'personal', category:'Subscription · actual posted amount', expenseType:'', clientProject:'', source:'manual', notes:'', icon:'card', includedInBalance:true, balanceApplied:false, reconciliationId:null, createdAt:'2026-09-08T12:00:00.000Z', updatedAt:'2026-09-08T12:00:00.000Z' },
+    { id:'tx-016', accountId:'a2', date:'2026-09-04', name:'Other Business Income', amount:795.00, status:'posted', entity:'personal', category:'Income', expenseType:'', clientProject:'', source:'manual', notes:'', icon:'banknote', includedInBalance:true, balanceApplied:false, reconciliationId:null, createdAt:'2026-09-04T12:00:00.000Z', updatedAt:'2026-09-04T12:00:00.000Z' },
+    { id:'tx-017', accountId:'a2', date:'2026-09-03', name:'Progressive', amount:-89.07, status:'posted', entity:'personal', category:'Auto insurance · actual posted amount', expenseType:'', clientProject:'', source:'manual', notes:'', icon:'shield', includedInBalance:true, balanceApplied:false, reconciliationId:null, createdAt:'2026-09-03T12:00:00.000Z', updatedAt:'2026-09-03T12:00:00.000Z' },
+    { id:'tx-018', accountId:'a1', date:'2026-09-03', name:'Apple.com / Bill', amount:-4.23, status:'posted', entity:'business', category:'Apple charge · actual posted amount', expenseType:'', clientProject:'', source:'manual', notes:'', icon:'card', includedInBalance:true, balanceApplied:false, reconciliationId:null, createdAt:'2026-09-03T12:00:00.000Z', updatedAt:'2026-09-03T12:00:00.000Z' },
+    { id:'tx-019', accountId:'a1', date:'2026-09-02', name:'AWS', amount:-0.52, status:'posted', entity:'business', category:'Cloud', expenseType:'', clientProject:'', source:'manual', notes:'', icon:'zap', includedInBalance:true, balanceApplied:false, reconciliationId:null, createdAt:'2026-09-02T12:00:00.000Z', updatedAt:'2026-09-02T12:00:00.000Z' },
+    { id:'tx-020', accountId:'a1', date:'2026-09-02', name:'Pinecone', amount:-51.50, status:'posted', entity:'business', category:'AI infrastructure', expenseType:'', clientProject:'', source:'manual', notes:'', icon:'zap', includedInBalance:true, balanceApplied:false, reconciliationId:null, createdAt:'2026-09-02T12:00:00.000Z', updatedAt:'2026-09-02T12:00:00.000Z' },
+    { id:'tx-021', accountId:'a1', date:'2026-09-01', name:'Bon Appétit Phase 1', amount:4500.00, status:'posted', entity:'business', category:'Client setup revenue', expenseType:'', clientProject:'Bon Appétit', source:'manual', notes:'', icon:'briefcase', includedInBalance:true, balanceApplied:false, reconciliationId:null, createdAt:'2026-09-01T12:00:00.000Z', updatedAt:'2026-09-01T12:00:00.000Z' },
+    { id:'tx-022', accountId:'a1', date:'2026-09-01', name:'Existing Client', amount:47.95, status:'posted', entity:'business', category:'Net recurring client cash', expenseType:'', clientProject:'', source:'manual', notes:'', icon:'briefcase', includedInBalance:true, balanceApplied:false, reconciliationId:null, createdAt:'2026-09-01T12:00:00.000Z', updatedAt:'2026-09-01T12:00:00.000Z' }
   ],
+  /* This $732.39 NOFA -> Personal transfer already occurred and is already
+     reflected in the seeded account balances above. It is recorded here as
+     completed/historical -- never re-applied -- not as a future plan. */
   ownerTransfers: [
-    { id:'ot-1', direction:'nofa_to_personal', kind:'withdrawal', amount:732.39, date:'2026-09-30', status:'planned', note:'Planned owner withdrawal', createdAt:'2026-09-12T12:00:00.000Z', updatedAt:'2026-09-12T12:00:00.000Z' }
+    { id:'ot-1', direction:'nofa_to_personal', kind:'withdrawal', amount:732.39, fromAccountId:'a1', toAccountId:'a2', date:'2026-09-01', status:'completed', includedInBalance:true, balanceApplied:false, note:'Owner withdrawal (already completed; reflected in current balances)', createdAt:'2026-09-01T12:00:00.000Z', updatedAt:'2026-09-12T12:00:00.000Z' }
   ],
   buildSpend: [
     { id:'bs-1', date:'2026-09-09', vendor:'Warp / Oz development', amount:50.00, note:'', createdAt:'2026-09-09T12:00:00.000Z', updatedAt:'2026-09-09T12:00:00.000Z' },
     { id:'bs-2', date:'2026-09-11', vendor:'Hugging Face', amount:6.13, note:'', createdAt:'2026-09-11T12:00:00.000Z', updatedAt:'2026-09-11T12:00:00.000Z' }
   ],
-  balanceSnapshots: []
+  balanceSnapshots: [],
+  balanceReconciliations: []
 };
 
 var DATA = {
@@ -800,18 +813,84 @@ var NAV = [
 
 /* ================================================================
    STATE
+   Financial Truth Phase A: schema upgrades NEVER discard existing data.
+   loadStore() migrates old-shape data in place (backup + backfill +
+   verify) instead of resetting to SEED on a version mismatch, which was
+   the prior (destructive) behavior.
 ================================================================ */
+function sumBalances(store) { return (store.accounts || []).reduce(function (s, a) { return s + (a.balance || 0); }, 0); }
+function countRecords(store) {
+  return { accounts: (store.accounts || []).length, transactions: (store.transactions || []).length, ownerTransfers: (store.ownerTransfers || []).length };
+}
+function firstAccountIdByEntity(store, entity) {
+  var a = (store.accounts || []).filter(function (x) { return x.entity === entity && !x.archived; })[0];
+  return a ? a.id : null;
+}
+function migrateStore(oldStore, rawJson) {
+  var oldVersion = oldStore.v;
+  /* 1) Back up the complete pre-migration state before touching anything. */
+  try { localStorage.setItem(STORE_KEY + '-backup-v' + (oldVersion != null ? oldVersion : 'unknown') + '-' + Date.now(), rawJson); } catch (e) {}
+  var before = { balance: sumBalances(oldStore), counts: countRecords(oldStore) };
+  var migrated = JSON.parse(JSON.stringify(oldStore));
+  /* 2) Backfill new Financial Truth fields with safe, non-mutating defaults.
+     Pre-existing transactions/transfers are treated as already covered by
+     the user's current account balances (like an implicit reconciliation),
+     so they are marked includedInBalance:true but balanceApplied:false --
+     they must never be (re)applied. */
+  (migrated.transactions || []).forEach(function (t) {
+    if (t.includedInBalance === undefined) t.includedInBalance = true;
+    if (t.balanceApplied === undefined) t.balanceApplied = false;
+    if (t.reconciliationId === undefined) t.reconciliationId = null;
+  });
+  (migrated.ownerTransfers || []).forEach(function (t) {
+    if (t.balanceApplied === undefined) t.balanceApplied = false;
+    if (t.includedInBalance === undefined) t.includedInBalance = true;
+    if (t.fromAccountId === undefined) t.fromAccountId = firstAccountIdByEntity(migrated, t.direction === 'personal_to_nofa' ? 'personal' : 'business');
+    if (t.toAccountId === undefined) t.toAccountId = firstAccountIdByEntity(migrated, t.direction === 'personal_to_nofa' ? 'business' : 'personal');
+    /* Known historical correction: the original $732.39 NOFA->Personal owner
+       withdrawal already happened and is already reflected in current
+       balances. It must be historical/completed, never a future plan, and
+       must never be (re)applied. */
+    if (t.status === 'planned' && t.direction === 'nofa_to_personal' && Math.abs((t.amount || 0) - 732.39) < 0.005) {
+      t.status = 'completed'; t.balanceApplied = false; t.includedInBalance = true;
+    }
+  });
+  (migrated.accounts || []).forEach(function (a) {
+    if (a.lastReconciledAt === undefined) a.lastReconciledAt = null;
+    /* Known historical correction: Business Market Rate Savings belongs to
+       Other Business, not NOFA. */
+    if (a.id === 'a3' && a.entity === 'business') a.entity = 'other_business';
+  });
+  if (!Array.isArray(migrated.balanceReconciliations)) migrated.balanceReconciliations = [];
+  if (!Array.isArray(migrated.balanceSnapshots)) migrated.balanceSnapshots = [];
+  /* 3) Verify nothing was lost or altered before committing the migration. */
+  var after = { balance: sumBalances(migrated), counts: countRecords(migrated) };
+  var ok = Math.abs(after.balance - before.balance) < 0.005 &&
+    after.counts.accounts === before.counts.accounts &&
+    after.counts.transactions === before.counts.transactions &&
+    after.counts.ownerTransfers === before.counts.ownerTransfers;
+  if (!ok) {
+    try { reportUiError('Data migration check failed \u2014 kept your existing data untouched', new Error('balance/record count mismatch during migration')); } catch (e) {}
+    return oldStore;
+  }
+  migrated.v = SEED.v;
+  return migrated;
+}
+function loadStore() {
+  var raw;
+  try { raw = localStorage.getItem(STORE_KEY); } catch (e) { raw = null; }
+  if (!raw) return JSON.parse(JSON.stringify(SEED));
+  var d;
+  try { d = JSON.parse(raw); } catch (e) { return JSON.parse(JSON.stringify(SEED)); }
+  if (!d || !Array.isArray(d.accounts)) return JSON.parse(JSON.stringify(SEED));
+  if (d.v === SEED.v) return d;
+  return migrateStore(d, raw);
+}
 var state = {
   view: 'home', sidebarOpen: false, modal: null,
   acctFilter: 'all', txQ: '', txF: 'all', recQ: '',
   horizon: 30, aiOpen: false, confirmDeleteAcct: null, confirmReset: false,
-  store: (function () {
-    try {
-      var raw = localStorage.getItem(STORE_KEY);
-      if (raw) { var d = JSON.parse(raw); if (d && d.v === SEED.v) return d; }
-    } catch (e) {}
-    return JSON.parse(JSON.stringify(SEED));
-  })()
+  store: loadStore()
 };
 function persist() {
   syncAiBudgetGoal();
@@ -820,6 +899,63 @@ function persist() {
 }
 function findAcct(id) { return state.store.accounts.filter(function (a) { return a.id === id; })[0]; }
 function findGoal(id) { return state.store.goals.filter(function (g) { return g.id === id; })[0]; }
+
+/* ================================================================
+   BALANCE APPLY / REVERSE ENGINE — Financial Truth Phase A
+   A transaction or owner transfer only ever changes an account
+   balance once. balanceApplied tracks whether THIS engine has
+   already added its signed amount to the account; every reversal
+   checks that flag first so double-counting is structurally
+   impossible, and reconciled/imported history (balanceApplied:false)
+   is never touched.
+================================================================ */
+function applyAmountToAccount(accountId, amount) {
+  var a = findAcct(accountId);
+  if (a) a.balance += amount;
+}
+function reverseTransactionApply(tx) {
+  if (tx && tx.balanceApplied) {
+    applyAmountToAccount(tx.accountId, -tx.amount);
+    tx.balanceApplied = false;
+  }
+}
+/* Applies (or withholds) a transaction's amount based on the user's
+   "already included" declaration and posted/pending status. For
+   edits, call reverseTransactionApply(tx) FIRST (using the OLD
+   accountId/amount), mutate the fields, then call this (using the
+   NEW values) so the net effect is a clean reverse-then-reapply. */
+function computeTransactionApply(tx, alreadyIncluded) {
+  if (alreadyIncluded) {
+    /* Declared as already reflected in the account's current balance
+       (e.g. a bank screenshot whose shown balance already includes
+       it) — must never be applied, exactly like a reconciliation
+       baseline. */
+    tx.includedInBalance = true;
+    tx.balanceApplied = false;
+  } else if (tx.status === 'posted') {
+    applyAmountToAccount(tx.accountId, tx.amount);
+    tx.includedInBalance = true;
+    tx.balanceApplied = true;
+  } else {
+    tx.includedInBalance = false;
+    tx.balanceApplied = false;
+  }
+}
+function reverseOwnerTransferApply(t) {
+  if (t && t.balanceApplied) {
+    applyAmountToAccount(t.fromAccountId, t.amount);
+    applyAmountToAccount(t.toAccountId, -t.amount);
+    t.balanceApplied = false;
+  }
+}
+function applyOwnerTransferIfCompleted(t) {
+  if (t.status === 'completed' && !t.balanceApplied && t.fromAccountId && t.toAccountId) {
+    applyAmountToAccount(t.fromAccountId, -t.amount);
+    applyAmountToAccount(t.toAccountId, t.amount);
+    t.balanceApplied = true;
+    t.includedInBalance = true;
+  }
+}
 
 function recurringList(entity) {
   var key = entity === 'business' ? 'recurringBusiness' : 'recurringPersonal';
@@ -855,13 +991,15 @@ function upsertTodaySnapshot() {
   var accounts = active.map(function (a) { return { id: a.id, balance: a.balance }; });
   var business = active.filter(function (a) { return a.entity === 'business'; }).reduce(function (s, a) { return s + a.balance; }, 0);
   var personal = active.filter(function (a) { return a.entity === 'personal'; }).reduce(function (s, a) { return s + a.balance; }, 0);
-  var total = business + personal;
+  var otherBusiness = active.filter(function (a) { return a.entity === 'other_business'; }).reduce(function (s, a) { return s + a.balance; }, 0);
+  /* total must reflect ALL active accounts, not just business+personal. */
+  var total = active.reduce(function (s, a) { return s + a.balance; }, 0);
   var last = list[list.length - 1];
   if (last && last.date === d) {
-    last.accounts = accounts; last.total = total; last.business = business; last.personal = personal;
+    last.accounts = accounts; last.total = total; last.business = business; last.personal = personal; last.otherBusiness = otherBusiness;
     last.updatedAt = new Date().toISOString();
   } else {
-    list.push({ id: 'bal-' + Date.now(), date: d, accounts: accounts, total: total, business: business, personal: personal, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() });
+    list.push({ id: 'bal-' + Date.now(), date: d, accounts: accounts, total: total, business: business, personal: personal, otherBusiness: otherBusiness, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() });
     if (list.length > 365) state.store.balanceSnapshots = list.slice(-365);
   }
 }
@@ -1132,6 +1270,13 @@ function forecastChartHTML(days) {
 /* ================================================================
    SHARED HTML BUILDERS
 ================================================================ */
+/* Three account/transaction entities exist: 'business' (NOFA),
+   'personal' (Farhad personal), and 'other_business' (a separate
+   business, never NOFA cash). These helpers give a consistent
+   third visual treatment using existing tile/chip classes only. */
+function entityTileClass(entity) { return entity === 'business' ? 'brand' : entity === 'other_business' ? 'slate' : 'grape'; }
+function entityChipClass(entity) { return entity === 'business' ? 'nofa' : entity === 'other_business' ? 'amber' : 'personal'; }
+function entityLabel(entity) { return entity === 'business' ? 'NOFA' : entity === 'other_business' ? 'Other Business' : 'Personal'; }
 function cardHead(icon, tint, title, sub, right) {
   return '<div class="chead"><div class="chead-l"><span class="tile ' + tint + '">' + ic(icon, 16) + '</span><div class="minw0"><p class="chead-t">' + title + '</p>' + (sub ? '<p class="chead-s">' + sub + '</p>' : '') + '</div></div>' + (right || '') + '</div>';
 }
@@ -1226,8 +1371,8 @@ function transactionsCard(rv) {
   return '<div class="card pad hfull fcol ' + rv + '">' +
     cardHead('swap', 'brand', 'Recent Transactions', 'Latest activity \u00b7 net ' + (net >= 0 ? '+' : '\u2212') + money(Math.abs(net)), viewAllBtn('transactions')) +
     '<div class="rows">' + rows.map(function (t) {
-      return '<div class="rowitem"><span class="tile ' + (t.entity === 'business' ? 'brand' : 'grape') + '">' + ic(t.icon || (t.amount > 0 ? 'banknote' : 'card'), 15) + '</span>' +
-        '<div class="rowmain"><p class="rowt">' + esc(t.name) + '</p><p class="rowsub">' + fmtShort(t.date) + ' \u00b7 ' + (t.entity === 'business' ? 'NOFA' : 'Personal') + '</p></div>' +
+      return '<div class="rowitem"><span class="tile ' + entityTileClass(t.entity) + '">' + ic(t.icon || (t.amount > 0 ? 'banknote' : 'card'), 15) + '</span>' +
+        '<div class="rowmain"><p class="rowt">' + esc(t.name) + '</p><p class="rowsub">' + fmtShort(t.date) + ' \u00b7 ' + entityLabel(t.entity) + '</p></div>' +
         '<p class="amt ' + (t.amount > 0 ? 'pos' : 'neg') + '">' + (t.amount > 0 ? '+' : '\u2212') + money(Math.abs(t.amount)) + '</p></div>';
     }).join('') + '</div></div>';
 }
@@ -1252,7 +1397,9 @@ function homeView(anim) {
   var active = st.accounts.filter(function (a) { return !a.archived; });
   var biz = active.filter(function (a) { return a.entity === 'business'; }).reduce(function (s, a) { return s + a.balance; }, 0);
   var per = active.filter(function (a) { return a.entity === 'personal'; }).reduce(function (s, a) { return s + a.balance; }, 0);
-  var total = biz + per;
+  /* Total Available Cash must include EVERY active account (including
+     other_business), never silently drop a bucket from the headline. */
+  var total = active.reduce(function (s, a) { return s + a.balance; }, 0);
   var bizM = recurringList('business').filter(function (r) { return !r.status; }).reduce(function (s, r) { return s + r.amount; }, 0);
   var perM = recurringList('personal').filter(function (r) { return !r.status; }).reduce(function (s, r) { return s + r.amount; }, 0);
   var aiGoal = aiBudgetGoal();
@@ -1311,13 +1458,12 @@ function homeView(anim) {
    ACCOUNTS VIEW
 ================================================================ */
 function accountCard(a) {
-  var biz = a.entity === 'business';
   var spark = a.spark && a.spark.length ? a.spark : genSpark(Math.abs(a.balance) + a.name.length * 7);
   var confirming = state.confirmDeleteAcct === a.id;
   return '<div class="card pad fcol acct' + (a.archived ? ' arch' : '') + '">' +
-    '<div class="acct-top"><div class="acct-id"><span class="tile ' + (biz ? 'brand' : 'grape') + '">' + ic('bank', 16) + '</span>' +
+    '<div class="acct-top"><div class="acct-id"><span class="tile ' + entityTileClass(a.entity) + '">' + ic('bank', 16) + '</span>' +
     '<div class="minw0"><p class="acct-name">' + esc(a.name) + '</p><p class="acct-type">' + esc(a.type) + '</p></div></div>' +
-    (a.archived ? '<span class="chip muted">Archived</span>' : '<span class="chip ' + (biz ? 'nofa' : 'personal') + '">' + (biz ? 'NOFA' : 'Personal') + '</span>') + '</div>' +
+    (a.archived ? '<span class="chip muted">Archived</span>' : '<span class="chip ' + entityChipClass(a.entity) + '">' + entityLabel(a.entity) + '</span>') + '</div>' +
     '<p class="acct-bal">' + money(a.balance) + '</p>' +
     '<p class="acct-sub">' + (a.archived ? 'Excluded from totals' : 'Available now') + '</p>' +
     '<div class="acct-spark">' + sparkSVG(spark, 280, 40, '#9DBAFF', 'rgba(46,99,231,.22)') + '</div>' +
@@ -1337,20 +1483,31 @@ function accountsView() {
   var active = st.accounts.filter(function (a) { return !a.archived; });
   var biz = active.filter(function (a) { return a.entity === 'business'; }).reduce(function (s, a) { return s + a.balance; }, 0);
   var per = active.filter(function (a) { return a.entity === 'personal'; }).reduce(function (s, a) { return s + a.balance; }, 0);
-  var total = biz + per || 1;
+  var other = active.filter(function (a) { return a.entity === 'other_business'; }).reduce(function (s, a) { return s + a.balance; }, 0);
+  /* Headline total must include EVERY active account regardless of
+     entity -- other_business balances must never be silently dropped. */
+  var total = (biz + per + other) || 1;
+  var hasOther = active.some(function (a) { return a.entity === 'other_business'; });
   var archived = st.accounts.filter(function (a) { return a.archived; }).length;
   var filtered = state.acctFilter === 'all' ? active
     : state.acctFilter === 'archived' ? st.accounts.filter(function (a) { return a.archived; })
     : st.accounts.filter(function (a) { return a.entity === state.acctFilter && !a.archived; });
-  var filters = [['all','All'],['business','NOFA Business'],['personal','Personal'],['archived','Archived' + (archived ? ' (' + archived + ')' : '')]];
+  var filters = [['all','All'],['business','NOFA Business'],['personal','Personal']]
+    .concat(hasOther ? [['other_business','Other Business']] : [])
+    .concat([['archived','Archived' + (archived ? ' (' + archived + ')' : '')]]);
   return pageHeader('Accounts', null, active.length + ' active \u00b7 ' + money(total) + ' available',
       '<button class="btn primary" data-action="modal" data-modal="add-account">' + ic('plus', 15) + 'Add Account</button>') +
     '<div class="card pad mb5"><div class="chead"><div class="chead-l"><span class="tile brand">' + ic('bank', 16) + '</span>' +
-    '<div><p class="chead-t">Cash split</p><p class="chead-s">Business vs personal share</p></div></div>' +
+    '<div><p class="chead-t">Cash split</p><p class="chead-s">Across all active accounts</p></div></div>' +
     '<div style="display:flex;gap:20px;font-size:12px;flex-wrap:wrap">' +
     '<span style="display:inline-flex;align-items:center;gap:6px"><i class="dot" style="background:var(--b500)"></i><b>NOFA ' + money(biz, 0) + '</b><span style="color:#94A3B8">\u00b7 ' + Math.round(biz / total * 100) + '%</span></span>' +
     '<span style="display:inline-flex;align-items:center;gap:6px"><i class="dot" style="background:var(--g500)"></i><b>Personal ' + money(per, 0) + '</b><span style="color:#94A3B8">\u00b7 ' + Math.round(per / total * 100) + '%</span></span>' +
-    '</div></div><div class="splitbar" style="margin-top:16px"><div class="sb b" style="width:' + (biz / total * 100) + '%"></div><div class="sb g" style="flex:1"></div></div></div>' +
+    (hasOther ? '<span style="display:inline-flex;align-items:center;gap:6px"><i class="dot" style="background:#E8A23D"></i><b>Other Business ' + money(other, 0) + '</b><span style="color:#94A3B8">\u00b7 ' + Math.round(other / total * 100) + '%</span></span>' : '') +
+    '</div></div><div class="splitbar" style="margin-top:16px"><div class="sb b" style="width:' + (biz / total * 100) + '%"></div>' +
+    (hasOther
+      ? '<div class="sb g" style="width:' + (per / total * 100) + '%"></div><div class="sb a" style="width:' + (other / total * 100) + '%"></div>'
+      : '<div class="sb g" style="flex:1"></div>') +
+    '</div></div>' +
     '<div class="fchips mb5">' + filters.map(function (f) {
       return '<button class="fchip' + (state.acctFilter === f[0] ? ' on' : '') + '" data-action="acct-filter" data-filter="' + f[0] + '">' + f[1] + '</button>';
     }).join('') + '</div>' +
@@ -1366,7 +1523,7 @@ function accountsView() {
 function txBodyHTML() {
   var f = state.txF, q = state.txQ.toLowerCase();
   var base = state.store.transactions.filter(function (t) {
-    return (f === 'all' || f === 'business' || f === 'personal') ? t.entity === f : true;
+    return (f === 'business' || f === 'personal' || f === 'other_business') ? t.entity === f : true;
   });
   var filtered = base.filter(function (t) {
     if (f === 'in' && t.amount <= 0) return false;
@@ -1388,7 +1545,7 @@ function txBodyHTML() {
       '<p style="font-size:12px;font-weight:600;letter-spacing:.08em;text-transform:uppercase;color:#64748B">' + fmtShort(g.date) + '</p>' +
       '<p style="font-size:11px;color:#94A3B8">' + g.items.length + ' transaction' + (g.items.length > 1 ? 's' : '') + '</p></div>' +
       '<div style="padding:4px 12px" class="rows">' + g.items.map(function (t) {
-        return '<div class="rowitem"><span class="tile ' + (t.entity === 'business' ? 'brand' : 'grape') + '">' + ic(t.icon || (t.amount > 0 ? 'banknote' : 'card'), 15) + '</span>' +
+        return '<div class="rowitem"><span class="tile ' + entityTileClass(t.entity) + '">' + ic(t.icon || (t.amount > 0 ? 'banknote' : 'card'), 15) + '</span>' +
           '<div class="rowmain"><p class="rowt">' + esc(t.name) + (t.status === 'pending' ? ' <span class="chip amber" style="margin-left:6px">Pending</span>' : '') + '</p><p class="rowsub">' + esc(t.category || '') + '</p></div>' +
           '<p class="amt ' + (t.amount > 0 ? 'pos' : 'neg') + '" style="width:86px;text-align:right">' + (t.amount > 0 ? '+' : '\u2212') + money(Math.abs(t.amount)) + '</p>' +
           '<div style="display:flex;gap:5px;flex-shrink:0">' +
@@ -1401,12 +1558,15 @@ function txBodyHTML() {
 function transactionsView() {
   var f = state.txF;
   var base = state.store.transactions.filter(function (t) {
-    return (f === 'all' || f === 'business' || f === 'personal') ? t.entity === f : true;
+    return (f === 'business' || f === 'personal' || f === 'other_business') ? t.entity === f : true;
   });
   var inS = base.filter(function (t) { return t.amount > 0; }).reduce(function (s, t) { return s + t.amount; }, 0);
   var outS = base.filter(function (t) { return t.amount < 0; }).reduce(function (s, t) { return s + Math.abs(t.amount); }, 0);
   var net = inS - outS;
-  var chips = [['all','All'],['business','NOFA'],['personal','Personal'],['in','Income'],['out','Expenses']];
+  var hasOtherTx = state.store.transactions.some(function (t) { return t.entity === 'other_business'; });
+  var chips = [['all','All'],['business','NOFA'],['personal','Personal']]
+    .concat(hasOtherTx ? [['other_business','Other Business']] : [])
+    .concat([['in','Income'],['out','Expenses']]);
   return pageHeader('Transactions', null, 'All activity \u00b7 synced with account balances',
       '<button class="btn ghost" data-action="export-csv">' + ic('download', 15) + 'Export CSV</button>' +
       '<button class="btn primary" data-action="modal" data-modal="add-transaction">' + ic('plus', 15) + 'Add Transaction</button>') +
@@ -1566,7 +1726,7 @@ function forecastView() {
     '<div class="hbar" style="margin-top:16px"><i style="width:' + reservePct + '%"></i></div>' +
     '<div style="display:flex;justify-content:space-between;margin-top:8px;font-size:11px;font-family:var(--mono);color:#94A3B8"><span>' + money(reserve.current, 0) + '</span><span>' + money(reserve.target, 0) + '</span></div>' +
     (planned.length ? '<div class="spendlist" style="margin-top:16px">' + planned.map(function (t) {
-      return '<div><span>' + esc(t.note || (t.direction === 'nofa_to_personal' ? 'NOFA \u2192 Personal' : 'Personal \u2192 NOFA')) + ' \u00b7 ' + fmtShort(t.date) + '</span><span style="display:flex;align-items:center;gap:8px"><span class="mono">' + money(t.amount) + '</span><button class="act danger" data-action="delete-owner-transfer" data-id="' + t.id + '" title="Delete">' + ic('trash', 12) + '</button></span></div>';
+      return '<div><span>' + esc(t.note || (t.direction === 'nofa_to_personal' ? 'NOFA \u2192 Personal' : 'Personal \u2192 NOFA')) + ' \u00b7 ' + fmtShort(t.date) + '</span><span style="display:flex;align-items:center;gap:8px"><span class="mono">' + money(t.amount) + '</span><button class="act" data-action="complete-owner-transfer" data-id="' + t.id + '" title="Mark completed">' + ic('check', 12) + '</button><button class="act danger" data-action="delete-owner-transfer" data-id="' + t.id + '" title="Delete">' + ic('trash', 12) + '</button></span></div>';
     }).join('') + '</div>' : '') +
     '<button class="btn ghost wide" style="margin-top:16px" data-action="modal" data-modal="add-owner-transfer">' + ic('plus', 14) + 'Add Owner Transfer</button></div>' +
     '<div class="card pad">' + cardHead('info', 'grape', 'Planning assumptions') +
@@ -1879,7 +2039,13 @@ function renderModal() {
     var tx = editing ? (state.store.transactions.filter(function (x) { return x.id === m.id; })[0] || {}) : {};
     var accts = state.store.accounts.filter(function (a) { return !a.archived || a.id === tx.accountId; });
     var isExpense = editing ? tx.amount < 0 : true;
-    html = modalShell(editing ? 'Edit Transaction' : 'Add Transaction', editing ? esc(tx.name || '') : 'Recorded as history \u2014 does not change the account balance.',
+    /* Already-included = user declares this transaction is already
+       reflected in the account balance (e.g. a bank screenshot) and
+       must never be auto-applied. Defaults to unchecked for new
+       transactions (posted ones auto-apply) and reflects the current
+       state for an existing one. */
+    var alreadyIncluded = editing ? !!(tx.includedInBalance && !tx.balanceApplied) : false;
+    html = modalShell(editing ? 'Edit Transaction' : 'Add Transaction', editing ? esc(tx.name || '') : 'Posted transactions automatically update the account balance below, unless marked as already reflected.',
       '<form class="mform" data-form="' + m.type + '"' + (editing ? ' data-id="' + esc(tx.id || '') + '"' : '') + '>' +
       '<label><span class="flabel">Account</span><select class="field" name="accountId">' +
       accts.map(function (a) { return '<option value="' + a.id + '"' + (a.id === tx.accountId ? ' selected' : '') + '>' + esc(a.name) + '</option>'; }).join('') + '</select></label>' +
@@ -1899,15 +2065,24 @@ function renderModal() {
       '<div class="formrow formrow2">' +
       '<label><span class="flabel">Client / project</span><input class="field" name="clientProject" value="' + esc(tx.clientProject || '') + '" placeholder="Optional"></label>' +
       '<label><span class="flabel">Notes</span><input class="field" name="notes" value="' + esc(tx.notes || '') + '" placeholder="Optional"></label></div>' +
+      '<div><span class="flabel">Already reflected in the account balance?</span><div class="seg2">' +
+      '<button type="button" class="' + (alreadyIncluded ? '' : 'on') + '" data-action="seg" data-v="0">' + ic('plus', 14) + 'No \u2014 apply now</button>' +
+      '<button type="button" class="' + (alreadyIncluded ? 'on' : '') + '" data-action="seg" data-v="1">' + ic('check', 14) + 'Yes \u2014 already counted</button></div>' +
+      '<input type="hidden" name="alreadyIncluded" value="' + (alreadyIncluded ? '1' : '0') + '"></div>' +
+      '<p style="font-size:11.5px;color:#64748B;margin-top:-8px">Choose \u201cYes\u201d only if this is already reflected in the account balance above (e.g. imported from a bank screenshot). Otherwise posted transactions automatically update the balance.</p>' +
       '<div class="mactions"><button type="button" class="btn ghost" data-action="close-modal">Cancel</button>' +
       '<button class="btn primary">' + ic(editing ? 'check' : 'plus', 15) + (editing ? 'Save Transaction' : 'Add Transaction') + '</button></div></form>');
   } else if (m.type === 'add-owner-transfer') {
-    html = modalShell('Add Owner Transfer', 'Tracked separately from revenue, expenses, and owner withdrawals.',
+    var transferAccts = state.store.accounts.filter(function (a) { return !a.archived && (a.entity === 'business' || a.entity === 'personal'); });
+    var bizAcct = transferAccts.filter(function (a) { return a.entity === 'business'; })[0];
+    var perAcct = transferAccts.filter(function (a) { return a.entity === 'personal'; })[0];
+    html = modalShell('Add Owner Transfer', 'Moves cash between a true NOFA business account and a personal account (never Other Business) \u2014 tracked separately from revenue, expenses, and owner withdrawals.',
       '<form class="mform" data-form="add-owner-transfer">' +
-      '<div><span class="flabel">Direction</span><div class="seg2">' +
-      '<button type="button" class="on" data-action="seg" data-v="nofa_to_personal">' + ic('arrowUp', 14) + 'NOFA \u2192 Personal</button>' +
-      '<button type="button" data-action="seg" data-v="personal_to_nofa">' + ic('arrowDown', 14) + 'Personal \u2192 NOFA</button></div>' +
-      '<input type="hidden" name="direction" value="nofa_to_personal"></div>' +
+      '<div class="formrow formrow2">' +
+      '<label><span class="flabel">From account</span><select class="field" name="fromAccountId">' +
+      transferAccts.map(function (a) { return '<option value="' + a.id + '"' + (a.id === (bizAcct && bizAcct.id) ? ' selected' : '') + '>' + esc(a.name) + ' (' + (a.entity === 'business' ? 'NOFA' : 'Personal') + ')</option>'; }).join('') + '</select></label>' +
+      '<label><span class="flabel">To account</span><select class="field" name="toAccountId">' +
+      transferAccts.map(function (a) { return '<option value="' + a.id + '"' + (a.id === (perAcct && perAcct.id) ? ' selected' : '') + '>' + esc(a.name) + ' (' + (a.entity === 'business' ? 'NOFA' : 'Personal') + ')</option>'; }).join('') + '</select></label></div>' +
       '<div class="formrow formrow2">' +
       '<label><span class="flabel">Date</span><input class="field" type="date" name="date" value="' + todayISO() + '" required></label>' +
       '<label><span class="flabel">Amount</span><div class="moneyfield"><span>$</span><input class="field" name="amount" inputmode="decimal" placeholder="0.00" required></div></label></div>' +
@@ -2068,6 +2243,7 @@ var ACTIONS = {
   'delete-transaction': function (d) {
     var tx = state.store.transactions.filter(function (x) { return x.id === d.id; })[0]; if (!tx) return;
     if (confirm('Delete transaction \u201c' + tx.name + '\u201d? This removes it from your history.')) {
+      reverseTransactionApply(tx);
       state.store.transactions = state.store.transactions.filter(function (x) { return x.id !== d.id; });
       persist(); toast('Transaction deleted', 'trash');
       if (state.modal) closeModal(); render(false);
@@ -2082,9 +2258,17 @@ var ACTIONS = {
   },
   'delete-owner-transfer': function (d) {
     if (confirm('Delete this owner transfer?')) {
+      var t = state.store.ownerTransfers.filter(function (x) { return x.id === d.id; })[0];
+      if (t) reverseOwnerTransferApply(t);
       state.store.ownerTransfers = state.store.ownerTransfers.filter(function (x) { return x.id !== d.id; });
       persist(); toast('Owner transfer deleted', 'trash'); render(false);
     }
+  },
+  'complete-owner-transfer': function (d) {
+    var t = state.store.ownerTransfers.filter(function (x) { return x.id === d.id; })[0]; if (!t) return;
+    t.status = 'completed'; t.updatedAt = new Date().toISOString();
+    applyOwnerTransferIfCompleted(t);
+    persist(); toast('Owner transfer marked completed'); render(false);
   },
   'delete-build-spend': function (d) {
     if (confirm('Delete this build spend entry?')) {
@@ -2162,7 +2346,20 @@ document.addEventListener('submit', function (e) {
     closeModal(); render(false);
   } else if (type === 'edit-account') {
     var a = findAcct(f.getAttribute('data-id')); if (!a) return;
-    a.name = (data.name || '').trim() || a.name; a.balance = num(data.balance);
+    a.name = (data.name || '').trim() || a.name;
+    var newBal = num(data.balance);
+    /* Manually changing the balance here is a reconciliation: the new
+       value becomes authoritative and is logged so it can be audited
+       later; it must never be re-applied by the transaction engine. */
+    if (Math.abs(newBal - (a.balance != null ? a.balance : 0)) >= 0.005) {
+      var nowIsoRec = new Date().toISOString();
+      state.store.balanceReconciliations.push({
+        id: 'rec-' + Date.now(), accountId: a.id, previousBalance: a.balance, newBalance: newBal,
+        date: todayISO(), createdAt: nowIsoRec
+      });
+      a.lastReconciledAt = nowIsoRec;
+      a.balance = newBal;
+    }
     persist(); toast('Account updated'); closeModal(); render(false);
   } else if (type === 'add-income') {
     var cadenceDaysMap = { 'Monthly': 30, 'Biweekly': 14, 'Weekly': 7, 'One-off': null, 'Variable': null };
@@ -2193,16 +2390,23 @@ document.addEventListener('submit', function (e) {
     var amt = num(data.amount);
     amt = data.txtype === 'expense' ? -Math.abs(amt) : Math.abs(amt);
     var nowIsoTx = new Date().toISOString();
-    state.store.transactions.push({
+    var newTx = {
       id: 'tx-' + Date.now(), accountId: acc ? acc.id : null, date: data.date || todayISO(),
       name: (data.name || '').trim() || 'Transaction', amount: amt, status: data.status === 'pending' ? 'pending' : 'posted',
       entity: acc ? acc.entity : 'business', category: (data.category || '').trim(), expenseType: '',
       clientProject: (data.clientProject || '').trim(), source: 'manual', notes: (data.notes || '').trim(),
-      icon: amt > 0 ? 'banknote' : 'card', createdAt: nowIsoTx, updatedAt: nowIsoTx
-    });
+      icon: amt > 0 ? 'banknote' : 'card', includedInBalance: false, balanceApplied: false, reconciliationId: null,
+      createdAt: nowIsoTx, updatedAt: nowIsoTx
+    };
+    state.store.transactions.push(newTx);
+    computeTransactionApply(newTx, data.alreadyIncluded === '1');
     persist(); toast('Transaction added'); closeModal(); render(false);
   } else if (type === 'edit-transaction') {
     var tx2 = state.store.transactions.filter(function (x) { return x.id === f.getAttribute('data-id'); })[0]; if (!tx2) return;
+    /* Reverse using the OLD accountId/amount before mutating fields, then
+       reapply using the NEW values -- a clean reverse-then-reapply so a
+       balance is never double-counted across an edit. */
+    reverseTransactionApply(tx2);
     var acc2 = findAcct(data.accountId) || findAcct(tx2.accountId);
     var amt2 = num(data.amount);
     amt2 = data.txtype === 'expense' ? -Math.abs(amt2) : Math.abs(amt2);
@@ -2216,15 +2420,22 @@ document.addEventListener('submit', function (e) {
     tx2.clientProject = (data.clientProject || '').trim();
     tx2.notes = (data.notes || '').trim();
     tx2.updatedAt = new Date().toISOString();
+    computeTransactionApply(tx2, data.alreadyIncluded === '1');
     persist(); toast('Transaction updated'); closeModal(); render(false);
   } else if (type === 'add-owner-transfer') {
-    var dir = data.direction === 'personal_to_nofa' ? 'personal_to_nofa' : 'nofa_to_personal';
+    var fromAcc = findAcct(data.fromAccountId);
+    var toAcc = findAcct(data.toAccountId);
+    var dir = (fromAcc && fromAcc.entity === 'personal') ? 'personal_to_nofa' : 'nofa_to_personal';
     var nowIsoOt = new Date().toISOString();
-    state.store.ownerTransfers.push({
+    var newOt = {
       id: 'ot-' + Date.now(), direction: dir, kind: dir === 'nofa_to_personal' ? 'withdrawal' : 'contribution',
-      amount: num(data.amount), date: data.date || todayISO(), status: data.status === 'completed' ? 'completed' : 'planned',
+      amount: num(data.amount), fromAccountId: fromAcc ? fromAcc.id : null, toAccountId: toAcc ? toAcc.id : null,
+      date: data.date || todayISO(), status: data.status === 'completed' ? 'completed' : 'planned',
+      includedInBalance: false, balanceApplied: false,
       note: (data.note || '').trim(), createdAt: nowIsoOt, updatedAt: nowIsoOt
-    });
+    };
+    state.store.ownerTransfers.push(newOt);
+    applyOwnerTransferIfCompleted(newOt);
     persist(); toast('Owner transfer added'); closeModal(); render(false);
   } else if (type === 'add-build-spend') {
     var nowIsoBs = new Date().toISOString();
@@ -2275,6 +2486,23 @@ document.addEventListener('keydown', function (e) {
 
 /* Init */
 render(true);
+
+/* Test-only hook (no behavior change for end users): exposes internals
+   for the Node-based headless verification harness. Safe to leave in
+   place since it only attaches read/call access to window, it does not
+   alter any app behavior. */
+if (typeof window !== 'undefined') {
+  window.__TEST__ = {
+    getState: function () { return state; },
+    loadStore: loadStore, migrateStore: migrateStore, SEED: SEED, STORE_KEY: STORE_KEY,
+    applyAmountToAccount: applyAmountToAccount, reverseTransactionApply: reverseTransactionApply,
+    computeTransactionApply: computeTransactionApply, reverseOwnerTransferApply: reverseOwnerTransferApply,
+    applyOwnerTransferIfCompleted: applyOwnerTransferIfCompleted,
+    findAcct: findAcct, sumBalances: sumBalances, countRecords: countRecords,
+    ACTIONS: ACTIONS, render: render, renderModal: renderModal, openModal: openModal,
+    persist: persist, todayISO: todayISO
+  };
+}
 })();
 </script>
 </body>
