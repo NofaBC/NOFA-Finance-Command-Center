@@ -2486,23 +2486,6 @@ document.addEventListener('keydown', function (e) {
 
 /* Init */
 render(true);
-
-/* Test-only hook (no behavior change for end users): exposes internals
-   for the Node-based headless verification harness. Safe to leave in
-   place since it only attaches read/call access to window, it does not
-   alter any app behavior. */
-if (typeof window !== 'undefined') {
-  window.__TEST__ = {
-    getState: function () { return state; },
-    loadStore: loadStore, migrateStore: migrateStore, SEED: SEED, STORE_KEY: STORE_KEY,
-    applyAmountToAccount: applyAmountToAccount, reverseTransactionApply: reverseTransactionApply,
-    computeTransactionApply: computeTransactionApply, reverseOwnerTransferApply: reverseOwnerTransferApply,
-    applyOwnerTransferIfCompleted: applyOwnerTransferIfCompleted,
-    findAcct: findAcct, sumBalances: sumBalances, countRecords: countRecords,
-    ACTIONS: ACTIONS, render: render, renderModal: renderModal, openModal: openModal,
-    persist: persist, todayISO: todayISO
-  };
-}
 })();
 </script>
 </body>
