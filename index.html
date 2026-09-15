@@ -1966,10 +1966,10 @@ function renderModal() {
   } else if (m.type === 'add-expense') {
     html = modalShell('Add Recurring Expense', 'Add a monthly business or personal obligation.',
       '<form class="mform" data-form="add-expense">' +
-      '<input type="hidden" name="entity" value="business">' +
       '<div><span class="flabel">Account</span><div class="seg2">' +
       '<button type="button" class="on" data-action="seg" data-v="business">' + ic('briefcase',14) + 'NOFA Business</button>' +
-      '<button type="button" data-action="seg" data-v="personal">' + ic('user',14) + 'Personal</button></div></div>' +
+      '<button type="button" data-action="seg" data-v="personal">' + ic('user',14) + 'Personal</button></div>' +
+      '<input type="hidden" name="entity" value="business"></div>' +
       '<div class="formrow formrow2">' +
       '<label><span class="flabel">Due day</span><input class="field" name="day" inputmode="numeric" maxlength="2" placeholder="e.g. 20" required></label>' +
       '<label><span class="flabel">Monthly amount</span><div class="moneyfield"><span>$</span><input class="field" name="amount" inputmode="decimal" placeholder="0.00" required></div></label></div>' +
