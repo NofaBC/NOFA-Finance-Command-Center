@@ -1600,7 +1600,8 @@ function recRow(i, entity) {
     '</div></div>';
 }
 function recGroup(title, entity, icon, items, q) {
-  var shown = items.filter(function (i) { return i.name.toLowerCase().indexOf(q) !== -1 || (i.note || '').toLowerCase().indexOf(q) !== -1; });
+  var shown = items.filter(function (i) { return i.name.toLowerCase().indexOf(q) !== -1 || (i.note || '').toLowerCase().indexOf(q) !== -1; })
+    .slice().sort(function (a, b) { return (parseInt(a.day, 10) || 0) - (parseInt(b.day, 10) || 0); });
   var act = items.filter(function (i) { return !i.status; });
   var total = act.reduce(function (s, i) { return s + i.amount; }, 0);
   return '<div class="card pad hfull"><div class="rghead"><div class="chead-l"><span class="tile ' + (entity === 'business' ? 'brand' : 'grape') + '">' + ic(icon, 16) + '</span>' +
