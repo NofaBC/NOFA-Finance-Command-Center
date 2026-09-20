@@ -980,6 +980,26 @@ function ensureRecurringIds() {
   });
 }
 ensureRecurringIds();
+/* Self-healing data check, runs on every load (not just version-bump
+   migrations): a ranged income source (amountLow/amountHigh both set) must
+   never also carry a non-null .amount -- the Edit Income form previously had
+   no way to edit a range and always wrote a single .amount field (defaulting
+   to 0 for a ranged source with no .amount), which silently shadowed the
+   range in monthlyIncomeBaseline() and made forecasts look stuck/wrong even
+   though the original amountLow/amountHigh were never actually destroyed.
+   Clearing the stray .amount here restores correct range-based forecasting
+   immediately, with no user action required. */
+function ensureIncomeSourceIntegrity() {
+  var changed = false;
+  (state.store.incomeSources || []).forEach(function (s) {
+    if (s.amountLow != null && s.amountHigh != null && s.amount != null) {
+      s.amount = null;
+      changed = true;
+    }
+  });
+  if (changed) persist();
+}
+ensureIncomeSourceIntegrity();
 
 /* ================================================================
    BALANCE SNAPSHOTS — one entry per calendar day, updated in place
@@ -2052,12 +2072,26 @@ function renderModal() {
       '<button class="btn primary">' + ic('plus', 15) + 'Add Goal</button></div></form>');
   } else if (m.type === 'edit-income') {
     var inc = state.store.incomeSources.filter(function (x) { return x.id === m.id; })[0] || {};
+    /* Ranged sources (e.g. "$750 \u2013 $850") must keep editing their low/high
+       ends -- the single "Forecast amount" field below has no way to
+       represent a range and previously always overwrote amountLow/amountHigh
+       with whatever it showed (0, since a ranged source has no .amount),
+       silently collapsing the source to a fixed $0 on the next save. Show
+       Low/High fields whenever the source has a range at all, so re-saving
+       also self-heals any source previously corrupted this way. */
+    var incIsRanged = inc.amountLow != null && inc.amountHigh != null;
     html = modalShell('Edit Income Source', esc(inc.name || ''),
       '<form class="mform" data-form="edit-income" data-id="' + esc(inc.id || '') + '">' +
       '<label><span class="flabel">Source name</span><input class="field" name="name" autofocus value="' + esc(inc.name || '') + '"></label>' +
       '<div class="formrow formrow2">' +
       '<label><span class="flabel">Display text</span><input class="field" name="display" value="' + esc(inc.display || '') + '"></label>' +
-      '<label><span class="flabel">Forecast amount</span><div class="moneyfield"><span>$</span><input class="field" name="amount" inputmode="decimal" value="' + (inc.amount != null ? inc.amount : 0) + '"></div></label></div>' +
+      (incIsRanged
+        ? '<div><span class="flabel">Forecast range</span><div class="formrow formrow2" style="gap:8px">' +
+          '<div class="moneyfield"><span>$</span><input class="field" name="amountLow" inputmode="decimal" placeholder="Low" value="' + (inc.amountLow != null ? inc.amountLow : 0) + '"></div>' +
+          '<div class="moneyfield"><span>$</span><input class="field" name="amountHigh" inputmode="decimal" placeholder="High" value="' + (inc.amountHigh != null ? inc.amountHigh : 0) + '"></div>' +
+          '</div></div>'
+        : '<label><span class="flabel">Forecast amount</span><div class="moneyfield"><span>$</span><input class="field" name="amount" inputmode="decimal" value="' + (inc.amount != null ? inc.amount : 0) + '"></div></label>') +
+      '</div>' +
       '<div class="formrow formrow2">' +
       '<label><span class="flabel">Cadence</span><select class="field" name="cadence">' +
       ['Monthly','Biweekly','Weekly','One-off','Variable'].map(function (c) { return '<option' + (inc.cadence === c ? ' selected' : '') + '>' + c + '</option>'; }).join('') + '</select></label>' +
@@ -2410,7 +2444,17 @@ document.addEventListener('submit', function (e) {
     var cadenceDaysMap2 = { 'Monthly': 30, 'Biweekly': 14, 'Weekly': 7, 'One-off': null, 'Variable': null };
     inc2.name = (data.name || '').trim() || inc2.name;
     inc2.display = (data.display || '').trim() || inc2.display;
-    inc2.amount = num(data.amount);
+    /* Ranged sources submit amountLow/amountHigh instead of amount (see the
+       modal above) -- write those through and clear amount so it can never
+       shadow the range in monthlyIncomeBaseline(). Fixed sources keep using
+       the single amount field and have no range to clear. */
+    if (data.amountLow !== undefined && data.amountHigh !== undefined) {
+      inc2.amountLow = num(data.amountLow);
+      inc2.amountHigh = num(data.amountHigh);
+      inc2.amount = null;
+    } else {
+      inc2.amount = num(data.amount);
+    }
     inc2.cadence = data.cadence || inc2.cadence;
     inc2.cadenceDays = cadenceDaysMap2[data.cadence] != null ? cadenceDaysMap2[data.cadence] : inc2.cadenceDays;
     inc2.cashStatus = data.cashStatus || inc2.cashStatus;
