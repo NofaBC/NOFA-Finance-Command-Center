@@ -981,10 +981,6 @@ function ensureRecurringIds() {
   });
 }
 ensureRecurringIds();
-/* Keep the NOFA Protected Reserve goal's "saved" figure derived and correct
-   as soon as the app loads, not only after some later mutation triggers
-   persist(). See syncReserveGoal() below. */
-syncReserveGoal();
 /* Self-healing data check, runs on every load (not just version-bump
    migrations): a ranged income source (amountLow/amountHigh both set) must
    never also carry a non-null .amount -- the Edit Income form previously had
@@ -1061,6 +1057,27 @@ function syncReserveGoal() {
   var g = state.store.goals.filter(isNofaReserveGoal)[0];
   if (g) g.current = nofaReserveSaved();
 }
+/* One-time non-destructive repair, run once on every load (in addition to
+   syncReserveGoal() being wired into persist() for ongoing sync after every
+   later mutation): recompute the NOFA Protected Reserve goal's derived
+   "current" and, if it differs from what is already stored, persist it
+   immediately. Without this, the corrected figure only lived in memory for
+   the current session -- it was never written back to localStorage until
+   some unrelated action happened to call persist() next, so a fresh reload
+   (or a different browser/profile reading the same stale localStorage
+   entry) could keep showing the old manually-set value indefinitely. This
+   only ever touches this one goal's .current field; accounts, transactions,
+   recurring expenses, income sources, and forecast logic are untouched. */
+function repairReserveGoal() {
+  var g = state.store.goals.filter(isNofaReserveGoal)[0];
+  if (!g) return;
+  var correct = nofaReserveSaved();
+  if (Math.abs((g.current || 0) - correct) >= 0.005) {
+    g.current = correct;
+    persist();
+  }
+}
+repairReserveGoal();
 
 /* ================================================================
    REPORTS — category mix + monthly cash flow derived from real data
