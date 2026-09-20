@@ -894,6 +894,7 @@ var state = {
 };
 function persist() {
   syncAiBudgetGoal();
+  syncReserveGoal();
   upsertTodaySnapshot();
   try { localStorage.setItem(STORE_KEY, JSON.stringify(state.store)); } catch (e) {}
 }
@@ -980,6 +981,10 @@ function ensureRecurringIds() {
   });
 }
 ensureRecurringIds();
+/* Keep the NOFA Protected Reserve goal's "saved" figure derived and correct
+   as soon as the app loads, not only after some later mutation triggers
+   persist(). See syncReserveGoal() below. */
+syncReserveGoal();
 /* Self-healing data check, runs on every load (not just version-bump
    migrations): a ranged income source (amountLow/amountHigh both set) must
    never also carry a non-null .amount -- the Edit Income form previously had
@@ -1037,6 +1042,25 @@ function entityTrend(entity) {
 function aiBudgetUsed() { return state.store.buildSpend.reduce(function (s, x) { return s + x.amount; }, 0); }
 function aiBudgetGoal() { return state.store.goals.filter(function (g) { return g.mode === 'spend'; })[0]; }
 function syncAiBudgetGoal() { var g = aiBudgetGoal(); if (g) g.current = aiBudgetUsed(); }
+
+/* ================================================================
+   NOFA PROTECTED RESERVE — "saved so far" is derived, not manually
+   edited (matches the AI Build Budget pattern above). Only the target
+   stays user-editable via the Edit Goal modal.
+================================================================ */
+function isNofaReserveGoal(g) { return !!g && (g.id === 'g1' || g.name === 'NOFA Protected Reserve'); }
+/* Current NOFA (business-entity) cash minus any owner withdrawals that are
+   still planned (not yet executed). Completed withdrawals are already
+   reflected in account balances and must not be subtracted again. */
+function nofaReserveSaved() {
+  var nofaCash = state.store.accounts.filter(function (a) { return !a.archived && a.entity === 'business'; }).reduce(function (s, a) { return s + a.balance; }, 0);
+  var plannedWithdrawals = state.store.ownerTransfers.filter(function (t) { return t.status === 'planned' && t.direction === 'nofa_to_personal'; }).reduce(function (s, t) { return s + t.amount; }, 0);
+  return nofaCash - plannedWithdrawals;
+}
+function syncReserveGoal() {
+  var g = state.store.goals.filter(isNofaReserveGoal)[0];
+  if (g) g.current = nofaReserveSaved();
+}
 
 /* ================================================================
    REPORTS — category mix + monthly cash flow derived from real data
@@ -1961,7 +1985,7 @@ function closeModal() {
   if (!state.sidebarOpen) document.body.style.overflow = '';
 }
 function modalShell(title, sub, body) {
-  return '<div class="modal-backdrop" data-action="close-modal"><div class="modal" data-stop="1">' +
+  return '<div class="modal-backdrop" data-action="close-modal" data-backdrop="1"><div class="modal" data-stop="1">' +
     '<div class="minner"><div class="mhead"><div><h3>' + title + '</h3>' + (sub ? '<p class="msub">' + sub + '</p>' : '') + '</div>' +
     '<button class="mclose" data-action="close-modal" aria-label="Close">' + ic('x', 16) + '</button></div>' +
     '<div class="mbody">' + body + '</div></div></div></div>';
@@ -2049,14 +2073,19 @@ function renderModal() {
   } else if (m.type === 'edit-goal') {
     var g = findGoal(m.id) || {};
     var spend = g.mode === 'spend';
+    /* NOFA Protected Reserve's "saved" amount is derived (see
+       syncReserveGoal()), not manually entered -- only its target stays
+       editable, matching the AI Build Budget spend-goal pattern below. */
+    var isReserve = isNofaReserveGoal(g);
     html = modalShell('Edit Goal', esc(g.name || ''),
       '<form class="mform" data-form="edit-goal" data-id="' + (g.id || '') + '">' +
       '<div class="formrow formrow2">' +
-      (spend
-        ? '<label><span class="flabel">Used so far</span><div class="moneyfield"><span>$</span><input class="field" inputmode="decimal" value="' + (g.current != null ? g.current.toFixed(2) : '0.00') + '" disabled></div></label>'
+      ((spend || isReserve)
+        ? '<label><span class="flabel">' + (spend ? 'Used so far' : 'Saved so far') + '</span><div class="moneyfield"><span>$</span><input class="field" inputmode="decimal" value="' + (g.current != null ? g.current.toFixed(2) : '0.00') + '" disabled></div></label>'
         : '<label><span class="flabel">Saved so far</span><div class="moneyfield"><span>$</span><input class="field" name="current" inputmode="decimal" autofocus value="' + (g.current != null ? g.current : 0) + '"></div></label>') +
-      '<label><span class="flabel">' + (spend ? 'Monthly cap' : 'Target') + '</span><div class="moneyfield"><span>$</span><input class="field" name="target" inputmode="decimal" value="' + (g.target != null ? g.target : 1000) + '"></div></label></div>' +
+      '<label><span class="flabel">' + (spend ? 'Monthly cap' : 'Target') + '</span><div class="moneyfield"><span>$</span><input class="field" name="target" inputmode="decimal"' + ((spend || isReserve) ? ' autofocus' : '') + ' value="' + (g.target != null ? g.target : 1000) + '"></div></label></div>' +
       (spend ? '<p style="font-size:12px;color:#64748B">Amount used is tracked automatically from Build Spend entries.</p>' : '') +
+      (isReserve ? '<p style="font-size:12px;color:#64748B">Automatically calculated as current NOFA cash minus any unexecuted planned owner withdrawals.</p>' : '') +
       (g.note ? '<p style="font-size:12px;color:#64748B">' + esc(g.note) + '</p>' : '') +
       '<div class="mactions"><button type="button" class="btn ghost" data-action="close-modal">Cancel</button>' +
       '<button class="btn primary">' + ic('check', 15) + 'Save goal</button></div></form>');
@@ -2386,6 +2415,13 @@ document.addEventListener('click', function (e) {
      Cancel (all inside or at the boundary) still works. */
   var stopBoundary = e.target.closest ? e.target.closest('[data-stop]') : null;
   if (stopBoundary && !stopBoundary.contains(t)) return;
+  /* Belt-and-suspenders: the modal backdrop's close action must only ever
+     fire for a click that lands DIRECTLY on the backdrop itself, never one
+     that merely bubbled up from a descendant (a field, label, wrapper div,
+     etc.). This is stricter than -- and independent of -- the data-stop
+     containment check above, so no interior click can ever be misrouted
+     into closing the modal regardless of DOM nesting. */
+  if (t.getAttribute('data-backdrop') && e.target !== t) return;
   var fn = ACTIONS[t.getAttribute('data-action')];
   if (fn) {
     e.preventDefault();
@@ -2543,7 +2579,11 @@ document.addEventListener('submit', function (e) {
     persist(); toast('Expense updated'); closeModal(); render(false);
   } else if (type === 'edit-goal') {
     var g = findGoal(f.getAttribute('data-id')); if (!g) return;
-    if (data.current !== undefined) g.current = num(data.current);
+    /* NOFA Protected Reserve's "current" is always derived by
+       syncReserveGoal() (called from persist() below) -- never accept a
+       manually-submitted value for it. Its field is disabled in the modal
+       so this normally never fires anyway; this is a defensive guard. */
+    if (!isNofaReserveGoal(g) && data.current !== undefined) g.current = num(data.current);
     g.target = num(data.target) || 1;
     persist(); toast('Goal updated'); closeModal(); render(false);
   } else if (type === 'add-goal') {
