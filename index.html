@@ -892,6 +892,12 @@ var state = {
   horizon: 30, aiOpen: false, confirmDeleteAcct: null, confirmReset: false,
   store: loadStore()
 };
+/* TEMPORARY DIAGNOSTIC LOGGING -- read-only, no logic change. Remove once
+   the reserve-derivation failure point is identified. */
+try {
+  console.log('[NOFA DIAG] 1) goals[0].current immediately after loadStore():',
+    state.store.goals && state.store.goals[0] ? state.store.goals[0].current : '(no goals[0])');
+} catch (e) { console.log('[NOFA DIAG] logging error at point 1:', e && e.message); }
 function persist() {
   syncAiBudgetGoal();
   syncReserveGoal();
@@ -1069,12 +1075,41 @@ function syncReserveGoal() {
    only ever touches this one goal's .current field; accounts, transactions,
    recurring expenses, income sources, and forecast logic are untouched. */
 function repairReserveGoal() {
+  /* TEMPORARY DIAGNOSTIC LOGGING -- every console.log below is read-only
+     and purely observational; the actual control flow (find goal, compare,
+     conditionally set + persist) is byte-for-byte unchanged from before. */
+  console.log('[NOFA DIAG] 5) repairReserveGoal() is running');
   var g = state.store.goals.filter(isNofaReserveGoal)[0];
-  if (!g) return;
+  if (!g) {
+    console.log('[NOFA DIAG] repairReserveGoal(): no matching reserve goal found (id "g1" / name "NOFA Protected Reserve") -- aborting');
+    return;
+  }
+  try {
+    var nofaCashDiag = state.store.accounts.filter(function (a) { return !a.archived && a.entity === 'business'; }).reduce(function (s, a) { return s + a.balance; }, 0);
+    var plannedWithdrawalsDiag = state.store.ownerTransfers.filter(function (t) { return t.status === 'planned' && t.direction === 'nofa_to_personal'; }).reduce(function (s, t) { return s + t.amount; }, 0);
+    console.log('[NOFA DIAG] 2) current NOFA business cash:', nofaCashDiag);
+    console.log('[NOFA DIAG] 3) planned unexecuted owner withdrawals total:', plannedWithdrawalsDiag);
+  } catch (e) { console.log('[NOFA DIAG] logging error at points 2/3:', e && e.message); }
   var correct = nofaReserveSaved();
-  if (Math.abs((g.current || 0) - correct) >= 0.005) {
+  console.log('[NOFA DIAG] 4) derived reserve from nofaReserveSaved():', correct);
+  console.log('[NOFA DIAG] stored goals[0].current before comparison:', g.current);
+  var diffDiag = Math.abs((g.current || 0) - correct);
+  var willUpdate = diffDiag >= 0.005;
+  console.log('[NOFA DIAG] 6) difference detected:', diffDiag, '-> will update+persist:', willUpdate);
+  if (willUpdate) {
     g.current = correct;
+    console.log('[NOFA DIAG] 7) persist() is about to be called');
     persist();
+    console.log('[NOFA DIAG] 7) persist() returned');
+    console.log('[NOFA DIAG] 8) goals[0].current immediately after persist():', state.store.goals[0] && state.store.goals[0].current);
+    try {
+      var rawAfterDiag = localStorage.getItem(STORE_KEY);
+      var parsedAfterDiag = rawAfterDiag ? JSON.parse(rawAfterDiag) : null;
+      console.log('[NOFA DIAG] 9) value read back from localStorage immediately after persist:',
+        parsedAfterDiag && parsedAfterDiag.goals && parsedAfterDiag.goals[0] ? parsedAfterDiag.goals[0].current : '(could not read/parse)');
+    } catch (e) { console.log('[NOFA DIAG] logging error at point 9 (localStorage read-back):', e && e.message); }
+  } else {
+    console.log('[NOFA DIAG] 7) persist() was NOT called (no difference detected)');
   }
 }
 repairReserveGoal();
