@@ -1038,12 +1038,37 @@ function computeCategoryMix(entity) {
   });
   return order.map(function (cat, i) { return [cat, byCat[cat], colorForCategory(cat, i)]; });
 }
+/* Standard pay-periods-per-year for known cadences, used instead of a naive
+   30/cadenceDays approximation. That approximation is measurably wrong for
+   biweekly income: 30/14 = 2.143 payments/month, but a true biweekly cadence
+   is 26 pay periods/year \u00f7 12 = 2.1667 payments/month. Monthly (30) and
+   weekly (7) also get their conventional 12 and 52 periods/year. Cadences
+   with no fixed recurrence (One-off/Variable, cadenceDays null) contribute
+   nothing to a recurring monthly projection. */
+var CADENCE_PERIODS_PER_YEAR = { 7: 52, 14: 26, 30: 12 };
+function cadenceMonthlyFactor(cadenceDays) {
+  if (!cadenceDays) return 0;
+  var periodsPerYear = CADENCE_PERIODS_PER_YEAR[cadenceDays] || (365.25 / cadenceDays);
+  return periodsPerYear / 12;
+}
+/* Returns { low, high, mid } monthly-equivalent totals across all confirmed +
+   expected income sources (pipeline is never counted). Ranged sources
+   (amountLow/amountHigh, e.g. "$750 \u2013 $850") keep their low and high ends
+   converted separately instead of collapsing to a single averaged figure, so
+   callers can show a true projected range. */
 function monthlyIncomeBaseline() {
-  return state.store.incomeSources.filter(function (s) { return s.cashStatus === 'confirmed' || s.cashStatus === 'expected'; }).reduce(function (sum, s) {
-    var amt = s.amount != null ? s.amount : (s.amountLow != null && s.amountHigh != null ? (s.amountLow + s.amountHigh) / 2 : 0);
-    var cd = s.cadenceDays || 30;
-    return sum + amt * (30 / cd);
-  }, 0);
+  var low = 0, high = 0;
+  state.store.incomeSources.filter(function (s) { return s.cashStatus === 'confirmed' || s.cashStatus === 'expected'; }).forEach(function (s) {
+    var factor = cadenceMonthlyFactor(s.cadenceDays);
+    if (s.amount != null) {
+      low += s.amount * factor;
+      high += s.amount * factor;
+    } else if (s.amountLow != null && s.amountHigh != null) {
+      low += s.amountLow * factor;
+      high += s.amountHigh * factor;
+    }
+  });
+  return { low: low, high: high, mid: (low + high) / 2 };
 }
 function monthlyExpenseBaseline() {
   var biz = recurringList('business').filter(function (r) { return !r.status; }).reduce(function (s, r) { return s + r.amount; }, 0);
@@ -1065,7 +1090,7 @@ function computeMonthlyCashflow(numMonths) {
       var exp = monthTx.filter(function (t) { return t.amount < 0; }).reduce(function (s, t) { return s + Math.abs(t.amount); }, 0);
       out.push({ m: label, income: inc, expense: exp, projected: false });
     } else {
-      out.push({ m: label, income: incomeBaseline, expense: expenseBaseline, projected: true });
+      out.push({ m: label, income: incomeBaseline.mid, incomeLow: incomeBaseline.low, incomeHigh: incomeBaseline.high, expense: expenseBaseline, projected: true });
     }
   }
   return out;
@@ -1206,7 +1231,10 @@ function barChartHTML(data, height, anim) {
       var net = d.income - d.expense;
       return '<div class="grp">' +
         '<div class="tip"><b>' + d.m + (d.projected ? ' \u00b7 projected' : '') + '</b>' +
-        '<span class="tl"><i class="dot leaf"></i>Income <span class="m2">' + money(d.income, 0) + '</span></span>' +
+        '<span class="tl"><i class="dot leaf"></i>Income <span class="m2">' +
+        (d.projected && d.incomeLow != null && d.incomeHigh != null && Math.abs(d.incomeHigh - d.incomeLow) >= 0.005
+          ? money(d.incomeLow, 0) + '\u2013' + money(d.incomeHigh, 0)
+          : money(d.income, 0)) + '</span></span>' +
         '<span class="tl" style="margin-top:2px"><i class="dot coral"></i>Expenses <span class="m2">' + money(d.expense, 0) + '</span></span>' +
         '<div class="net">' + (net >= 0 ? '+' : '\u2212') + money(Math.abs(net), 0) + ' net</div></div>' +
         '<div class="bar in" style="height:' + Math.max(d.income / max * 100, 2) + '%;animation-delay:' + (gi * 90) + 'ms"></div>' +
@@ -1670,14 +1698,18 @@ function incomeCardView(s) {
 }
 function incomeView() {
   var confirmed = state.store.incomeSources.filter(function (s) { return s.cashStatus === 'confirmed'; });
-  var confirmedMonthly = confirmed.reduce(function (sum, s) { var cd = s.cadenceDays || 30; return sum + (s.amount || 0) * (30 / cd); }, 0);
+  var confirmedMonthly = confirmed.reduce(function (sum, s) { return sum + (s.amount || 0) * cadenceMonthlyFactor(s.cadenceDays); }, 0);
   var projectedBase = monthlyIncomeBaseline();
   var nextUp = state.store.incomeSources.filter(function (s) { return s.cashStatus !== 'pipeline' && s.nextDate; }).sort(function (a, b) { return a.nextDate.localeCompare(b.nextDate); })[0];
   return pageHeader('Income', null, 'Projected streams and their true cash status',
       '<button class="btn primary" data-action="modal" data-modal="add-income">' + ic('plus', 15) + 'Add Income Source</button>') +
     '<div class="stat3">' +
     '<div class="stat" style="display:flex;align-items:center;gap:16px"><span class="tile leaf">' + ic('banknote', 17) + '</span><div class="minw0"><span class="flabel" style="margin-bottom:2px">Confirmed monthly</span><p class="sv">' + money(confirmedMonthly, 0) + '</p><p class="chead-s">' + confirmed.length + ' confirmed source' + (confirmed.length === 1 ? '' : 's') + '</p></div></div>' +
-    '<div class="stat" style="display:flex;align-items:center;gap:16px"><span class="tile brand">' + ic('trend', 17) + '</span><div class="minw0"><span class="flabel" style="margin-bottom:2px">Projected base</span><p class="sv">~' + money(projectedBase, 0) + '</p><p class="chead-s">Confirmed + expected recurring</p></div></div>' +
+    '<div class="stat" style="display:flex;align-items:center;gap:16px"><span class="tile brand">' + ic('trend', 17) + '</span><div class="minw0"><span class="flabel" style="margin-bottom:2px">Projected base</span><p class="sv">' +
+    (Math.abs(projectedBase.high - projectedBase.low) >= 0.005
+      ? money(projectedBase.low, 0) + ' \u2013 ' + money(projectedBase.high, 0)
+      : '~' + money(projectedBase.mid, 0)) +
+    '</p><p class="chead-s">Confirmed + expected recurring</p></div></div>' +
     '<div class="stat" style="display:flex;align-items:center;gap:16px"><span class="tile grape">' + ic('clock', 17) + '</span><div class="minw0"><span class="flabel" style="margin-bottom:2px">Next expected</span><p class="sv">' + (nextUp ? fmtShort(nextUp.nextDate) : '\u2014') + '</p><p class="chead-s">' + (nextUp ? esc(nextUp.name) + ' \u00b7 ' + esc(nextUp.display) : 'None scheduled') + '</p></div></div>' +
     '</div>' +
     '<div class="grid3">' + state.store.incomeSources.map(incomeCardView).join('') +
