@@ -349,7 +349,7 @@ svg{display:block}
 .stat .sv.pos{color:var(--l600)}.stat .sv.neg{color:var(--c600)}
 .splitbar{height:12px;border-radius:999px;overflow:hidden;display:flex;background:rgba(231,235,241,.7)}
 .splitbar .sb{transition:width .7s var(--ease)}
-.splitbar .sb.b{background:var(--b500)}.splitbar .sb.g{background:var(--g500)}
+.splitbar .sb.b{background:var(--b500)}.splitbar .sb.g{background:var(--g500)}.splitbar .sb.a{background:#E8A23D}
 .hbar{height:10px;border-radius:999px;background:var(--line);overflow:hidden}
 .hbar i{display:block;height:100%;border-radius:999px;background:var(--b500)}
 .lrow{display:flex;align-items:center;gap:12px}
@@ -585,8 +585,35 @@ function money(n, dec) {
   return sign + '$' + v.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
 var MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
-var DEMO_BASE = new Date(2026, 8, 12); /* current prototype clock: Saturday, September 12, 2026 */
-function dlabel(i) { var d = new Date(DEMO_BASE.getTime() + i * 864e5); return MONTHS[d.getMonth()] + ' ' + d.getDate(); }
+var WEEKDAYS = ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'];
+/* Phase 1A: the app clock is the real device date (previously a frozen demo
+   date). Recurring due-days, obligations and the Known Forecast now advance
+   automatically as real time passes.
+   IMPORTANT: `new Date()` with no arguments always resolves to the client
+   device/browser's LOCAL timezone (never UTC). Every "today"/"next X days"
+   calculation in this file (home hero date, forecast, reports, balance
+   snapshots, obligations) is derived from todayBase()/todayISO() below, or
+   from local Date getters (getFullYear/getMonth/getDate/getDay/getHours).
+   Do not introduce getUTC*() methods, Date.UTC(), or toISOString()-based
+   date-only comparisons here — those are UTC and would drift by a day near
+   midnight depending on the user's timezone. toISOString() is only used
+   for createdAt/updatedAt audit timestamps, never for "today" display. */
+function todayBase() { var d = new Date(); d.setHours(0, 0, 0, 0); return d; }
+function pad2(n) { return (n < 10 ? '0' : '') + n; }
+function isoOf(d) { return d.getFullYear() + '-' + pad2(d.getMonth() + 1) + '-' + pad2(d.getDate()); }
+function parseISO(iso) { var p = String(iso || '').split('-'); return new Date(+p[0] || 1970, (+p[1] || 1) - 1, +p[2] || 1); }
+function todayISO() { return isoOf(todayBase()); }
+function daysBetween(a, b) { return Math.round((b.getTime() - a.getTime()) / 864e5); }
+function dlabel(i) { var d = new Date(todayBase().getTime() + i * 864e5); return MONTHS[d.getMonth()] + ' ' + d.getDate(); }
+function fmtShort(iso) { var d = parseISO(iso); return MONTHS[d.getMonth()] + ' ' + d.getDate(); }
+/* Next occurrence on/after fromDate of a given day-of-month (clamped to short months). */
+function nextOccurrenceDate(day, fromDate) {
+  day = Math.max(1, Math.min(31, parseInt(day, 10) || 1));
+  function clamp(y, m) { var last = new Date(y, m + 1, 0).getDate(); return new Date(y, m, Math.min(day, last)); }
+  var cand = clamp(fromDate.getFullYear(), fromDate.getMonth());
+  if (cand < fromDate) cand = clamp(fromDate.getFullYear(), fromDate.getMonth() + 1);
+  return cand;
+}
 var _uid = 0; var uid = function () { return 'u' + (_uid++); };
 function downloadFile(name, content, type) {
   var blob = new Blob([content], { type: type || 'text/csv' });
@@ -649,160 +676,127 @@ function logoSVG(s) {
 }
 
 /* ================================================================
-   DATA LAYER — Firebase swap point (v2)
-   SEED = mutable + persisted to localStorage; DATA = static seed
+   DATA LAYER — persisted app state (state.store) + static seed catalogs
+   SEED = mutable + persisted to localStorage (Phase 1A: dynamic local model)
+   DATA.recurring* = static starting catalogs copied into state.store on
+   first run only — see recurringList(). Everything financial that the
+   dashboard displays now lives in state.store and is user-editable.
 ================================================================ */
 var STORE_KEY = 'nofa-prototype-v1';
+/* Financial Truth Phase A: three account entities exist, not two.
+   'business' = NOFA (currently exactly one account). 'personal' = Farhad's
+   personal account(s). 'other_business' = a separate business (e.g. the
+   Business Market Rate Savings account below) that is NOT NOFA and must
+   never be treated as NOFA cash. */
 var SEED = {
-  v: 3,
+  v: 5,
   profile: { name: 'Farhad', initials: 'FN' },
   settings: { weeklySummary: true, billReminders: true, reserveAlerts: true, showBanner: true },
   accounts: [
-    { id:'a1', name:'NOFA Business Checking', entity:'business', type:'Business Checking', balance:4358.68, spark:[42,45,44,47,46,49,48,51,50,53], archived:false },
-    { id:'a2', name:'Personal Checking', entity:'personal', type:'Everyday Checking', balance:466.46, spark:[38,35,33,30,31,28,30,27,28,26], archived:false },
-    { id:'a3', name:'Business Market Rate Savings', entity:'business', type:'Business Savings', balance:1.45, spark:[1,1,1,1,1,1,1,1,1,1], archived:false }
+    { id:'a1', name:'NOFA Business Checking', entity:'business', type:'Business Checking', balance:4358.68, spark:[42,45,44,47,46,49,48,51,50,53], archived:false, lastReconciledAt:null },
+    { id:'a2', name:'Personal Checking', entity:'personal', type:'Everyday Checking', balance:466.46, spark:[38,35,33,30,31,28,30,27,28,26], archived:false, lastReconciledAt:null },
+    { id:'a3', name:'Business Market Rate Savings', entity:'other_business', type:'Business Savings', balance:1.45, spark:[1,1,1,1,1,1,1,1,1,1], archived:false, lastReconciledAt:null }
   ],
   goals: [
-    { id:'g1', name:'NOFA Protected Reserve', short:'NOFA Reserve', current:3626.29, target:4000, note:'Projected after planned $732.39 owner withdrawal', color:'brand', mode:'save' },
-    { id:'g2', name:'AI Build Budget', short:'AI Build Budget', current:56.13, target:400, note:'$50 Warp/Oz development + $6.13 Hugging Face', color:'grape', mode:'spend' },
+    { id:'g1', name:'NOFA Protected Reserve', short:'NOFA Reserve', current:3626.29, target:4000, note:'Business cash minus planned owner withdrawals not yet executed', color:'brand', mode:'save' },
+    { id:'g2', name:'AI Build Budget', short:'AI Build Budget', current:56.13, target:400, note:'Auto-tracked from Build Spend ledger', color:'grape', mode:'spend' },
     { id:'g3', name:'October Tax Down Payment', short:'October Tax', current:0, target:200, note:'Due by October 15, 2026', color:'amber', mode:'save' },
     { id:'g4', name:'November Car Repair', short:'November Car', current:0, target:600, note:'Expected repair around November', color:'teal', mode:'save' }
   ],
   incomeSources: [
-    { id:'i1', name:'Other Business', display:'$750 – $850', cadence:'Biweekly', note:'Next expected September 18', status:'active' },
-    { id:'i2', name:'Bon Appétit', display:'$295.00', cadence:'Monthly starting October', note:'Gross recurring revenue — deduct direct Judy/API costs', status:'active' },
-    { id:'i3', name:'Existing Client', display:'$47.95', cadence:'Monthly net cash', note:'$50 gross less $2.05 processing fee', status:'active' },
-    { id:'i4', name:'New Client', display:'Needed', cadence:'Priority: next 30 days', note:'Target: setup fee + recurring monthly revenue', status:'planned' }
-  ]
+    { id:'i1', name:'Other Business', display:'$750 – $850', cadence:'Biweekly', cadenceDays:14, amountLow:750, amountHigh:850, entity:'personal', cashStatus:'expected', nextDate:'2026-09-18', note:'Next expected September 18', status:'active' },
+    { id:'i2', name:'Bon Appétit', display:'$295.00', cadence:'Monthly starting October', cadenceDays:30, amount:295.00, entity:'business', cashStatus:'confirmed', nextDate:'2026-10-01', note:'Gross recurring revenue — deduct direct Judy/API costs', status:'active' },
+    { id:'i3', name:'Existing Client', display:'$47.95', cadence:'Monthly net cash', cadenceDays:30, amount:47.95, entity:'business', cashStatus:'confirmed', nextDate:'2026-10-01', note:'$50 gross less $2.05 processing fee', status:'active' },
+    { id:'i4', name:'New Client', display:'Needed', cadence:'Priority: next 30 days', cadenceDays:null, amount:0, entity:'business', cashStatus:'pipeline', nextDate:null, note:'Target: setup fee + recurring monthly revenue — pipeline, not spendable cash', status:'planned' }
+  ],
+  /* All seeded transactions below predate this engine and are already
+     reflected in the seeded account balances above -- exactly like a
+     reconciliation baseline. They must never be (re)applied, matching
+     what the migration does for a real user's pre-existing data. */
+  transactions: [
+    { id:'tx-001', accountId:'a1', date:'2026-09-11', name:'Hugging Face', amount:-6.13, status:'posted', entity:'business', category:'AI development / research', expenseType:'', clientProject:'', source:'manual', notes:'', icon:'sparkle', includedInBalance:true, balanceApplied:false, reconciliationId:null, createdAt:'2026-09-11T12:00:00.000Z', updatedAt:'2026-09-11T12:00:00.000Z' },
+    { id:'tx-002', accountId:'a1', date:'2026-09-11', name:'ElevenLabs', amount:-23.32, status:'posted', entity:'business', category:'Recurring AI / voice', expenseType:'', clientProject:'', source:'manual', notes:'', icon:'zap', includedInBalance:true, balanceApplied:false, reconciliationId:null, createdAt:'2026-09-11T12:00:00.000Z', updatedAt:'2026-09-11T12:00:00.000Z' },
+    { id:'tx-003', accountId:'a2', date:'2026-09-10', name:'Continental Finance', amount:-82.00, status:'posted', entity:'personal', category:'Credit card payment', expenseType:'', clientProject:'', source:'manual', notes:'', icon:'card', includedInBalance:true, balanceApplied:false, reconciliationId:null, createdAt:'2026-09-10T12:00:00.000Z', updatedAt:'2026-09-10T12:00:00.000Z' },
+    { id:'tx-004', accountId:'a1', date:'2026-09-09', name:'Alignable', amount:-31.80, status:'posted', entity:'business', category:'Networking / operating', expenseType:'', clientProject:'', source:'manual', notes:'', icon:'briefcase', includedInBalance:true, balanceApplied:false, reconciliationId:null, createdAt:'2026-09-09T12:00:00.000Z', updatedAt:'2026-09-09T12:00:00.000Z' },
+    { id:'tx-005', accountId:'a1', date:'2026-09-09', name:'Warp.dev', amount:-10.00, status:'posted', entity:'business', category:'AI development', expenseType:'', clientProject:'', source:'manual', notes:'', icon:'zap', includedInBalance:true, balanceApplied:false, reconciliationId:null, createdAt:'2026-09-09T12:00:00.000Z', updatedAt:'2026-09-09T12:00:00.000Z' },
+    { id:'tx-006', accountId:'a2', date:'2026-09-09', name:'Aspire MC', amount:-50.00, status:'posted', entity:'personal', category:'Credit card payment', expenseType:'', clientProject:'', source:'manual', notes:'', icon:'card', includedInBalance:true, balanceApplied:false, reconciliationId:null, createdAt:'2026-09-09T12:00:00.000Z', updatedAt:'2026-09-09T12:00:00.000Z' },
+    { id:'tx-007', accountId:'a2', date:'2026-09-09', name:'Credit One Bank', amount:-20.00, status:'posted', entity:'personal', category:'Credit card payment', expenseType:'', clientProject:'', source:'manual', notes:'', icon:'card', includedInBalance:true, balanceApplied:false, reconciliationId:null, createdAt:'2026-09-09T12:00:00.000Z', updatedAt:'2026-09-09T12:00:00.000Z' },
+    { id:'tx-008', accountId:'a2', date:'2026-09-09', name:'Kaiser', amount:-75.00, status:'posted', entity:'personal', category:'Health', expenseType:'', clientProject:'', source:'manual', notes:'', icon:'heart', includedInBalance:true, balanceApplied:false, reconciliationId:null, createdAt:'2026-09-09T12:00:00.000Z', updatedAt:'2026-09-09T12:00:00.000Z' },
+    { id:'tx-009', accountId:'a1', date:'2026-09-08', name:'Warp.dev', amount:-20.00, status:'posted', entity:'business', category:'AI development', expenseType:'', clientProject:'', source:'manual', notes:'', icon:'zap', includedInBalance:true, balanceApplied:false, reconciliationId:null, createdAt:'2026-09-08T12:00:00.000Z', updatedAt:'2026-09-08T12:00:00.000Z' },
+    { id:'tx-010', accountId:'a1', date:'2026-09-08', name:'Opus Pro', amount:-29.87, status:'posted', entity:'business', category:'Operating / video marketing', expenseType:'', clientProject:'', source:'manual', notes:'', icon:'sparkle', includedInBalance:true, balanceApplied:false, reconciliationId:null, createdAt:'2026-09-08T12:00:00.000Z', updatedAt:'2026-09-08T12:00:00.000Z' },
+    { id:'tx-011', accountId:'a1', date:'2026-09-08', name:'Warp.dev', amount:-20.00, status:'posted', entity:'business', category:'AI development', expenseType:'', clientProject:'', source:'manual', notes:'', icon:'zap', includedInBalance:true, balanceApplied:false, reconciliationId:null, createdAt:'2026-09-08T12:00:00.000Z', updatedAt:'2026-09-08T12:00:00.000Z' },
+    { id:'tx-012', accountId:'a2', date:'2026-09-08', name:'Concora Credit Payment', amount:-50.00, status:'posted', entity:'personal', category:'Credit card payment', expenseType:'', clientProject:'', source:'manual', notes:'', icon:'card', includedInBalance:true, balanceApplied:false, reconciliationId:null, createdAt:'2026-09-08T12:00:00.000Z', updatedAt:'2026-09-08T12:00:00.000Z' },
+    { id:'tx-013', accountId:'a2', date:'2026-09-08', name:'Concora Credit Payment', amount:-50.00, status:'posted', entity:'personal', category:'Credit card payment', expenseType:'', clientProject:'', source:'manual', notes:'', icon:'card', includedInBalance:true, balanceApplied:false, reconciliationId:null, createdAt:'2026-09-08T12:00:00.000Z', updatedAt:'2026-09-08T12:00:00.000Z' },
+    { id:'tx-014', accountId:'a2', date:'2026-09-08', name:'Temu', amount:-10.62, status:'posted', entity:'personal', category:'Personal purchase', expenseType:'', clientProject:'', source:'manual', notes:'', icon:'card', includedInBalance:true, balanceApplied:false, reconciliationId:null, createdAt:'2026-09-08T12:00:00.000Z', updatedAt:'2026-09-08T12:00:00.000Z' },
+    { id:'tx-015', accountId:'a2', date:'2026-09-08', name:'Washington Post', amount:-12.72, status:'posted', entity:'personal', category:'Subscription · actual posted amount', expenseType:'', clientProject:'', source:'manual', notes:'', icon:'card', includedInBalance:true, balanceApplied:false, reconciliationId:null, createdAt:'2026-09-08T12:00:00.000Z', updatedAt:'2026-09-08T12:00:00.000Z' },
+    { id:'tx-016', accountId:'a2', date:'2026-09-04', name:'Other Business Income', amount:795.00, status:'posted', entity:'personal', category:'Income', expenseType:'', clientProject:'', source:'manual', notes:'', icon:'banknote', includedInBalance:true, balanceApplied:false, reconciliationId:null, createdAt:'2026-09-04T12:00:00.000Z', updatedAt:'2026-09-04T12:00:00.000Z' },
+    { id:'tx-017', accountId:'a2', date:'2026-09-03', name:'Progressive', amount:-89.07, status:'posted', entity:'personal', category:'Auto insurance · actual posted amount', expenseType:'', clientProject:'', source:'manual', notes:'', icon:'shield', includedInBalance:true, balanceApplied:false, reconciliationId:null, createdAt:'2026-09-03T12:00:00.000Z', updatedAt:'2026-09-03T12:00:00.000Z' },
+    { id:'tx-018', accountId:'a1', date:'2026-09-03', name:'Apple.com / Bill', amount:-4.23, status:'posted', entity:'business', category:'Apple charge · actual posted amount', expenseType:'', clientProject:'', source:'manual', notes:'', icon:'card', includedInBalance:true, balanceApplied:false, reconciliationId:null, createdAt:'2026-09-03T12:00:00.000Z', updatedAt:'2026-09-03T12:00:00.000Z' },
+    { id:'tx-019', accountId:'a1', date:'2026-09-02', name:'AWS', amount:-0.52, status:'posted', entity:'business', category:'Cloud', expenseType:'', clientProject:'', source:'manual', notes:'', icon:'zap', includedInBalance:true, balanceApplied:false, reconciliationId:null, createdAt:'2026-09-02T12:00:00.000Z', updatedAt:'2026-09-02T12:00:00.000Z' },
+    { id:'tx-020', accountId:'a1', date:'2026-09-02', name:'Pinecone', amount:-51.50, status:'posted', entity:'business', category:'AI infrastructure', expenseType:'', clientProject:'', source:'manual', notes:'', icon:'zap', includedInBalance:true, balanceApplied:false, reconciliationId:null, createdAt:'2026-09-02T12:00:00.000Z', updatedAt:'2026-09-02T12:00:00.000Z' },
+    { id:'tx-021', accountId:'a1', date:'2026-09-01', name:'Bon Appétit Phase 1', amount:4500.00, status:'posted', entity:'business', category:'Client setup revenue', expenseType:'', clientProject:'Bon Appétit', source:'manual', notes:'', icon:'briefcase', includedInBalance:true, balanceApplied:false, reconciliationId:null, createdAt:'2026-09-01T12:00:00.000Z', updatedAt:'2026-09-01T12:00:00.000Z' },
+    { id:'tx-022', accountId:'a1', date:'2026-09-01', name:'Existing Client', amount:47.95, status:'posted', entity:'business', category:'Net recurring client cash', expenseType:'', clientProject:'', source:'manual', notes:'', icon:'briefcase', includedInBalance:true, balanceApplied:false, reconciliationId:null, createdAt:'2026-09-01T12:00:00.000Z', updatedAt:'2026-09-01T12:00:00.000Z' }
+  ],
+  /* This $732.39 NOFA -> Personal transfer already occurred and is already
+     reflected in the seeded account balances above. It is recorded here as
+     completed/historical -- never re-applied -- not as a future plan. */
+  ownerTransfers: [
+    { id:'ot-1', direction:'nofa_to_personal', kind:'withdrawal', amount:732.39, fromAccountId:'a1', toAccountId:'a2', date:'2026-09-01', status:'completed', includedInBalance:true, balanceApplied:false, note:'Owner withdrawal (already completed; reflected in current balances)', createdAt:'2026-09-01T12:00:00.000Z', updatedAt:'2026-09-12T12:00:00.000Z' }
+  ],
+  buildSpend: [
+    { id:'bs-1', date:'2026-09-09', vendor:'Warp / Oz development', amount:50.00, note:'', createdAt:'2026-09-09T12:00:00.000Z', updatedAt:'2026-09-09T12:00:00.000Z' },
+    { id:'bs-2', date:'2026-09-11', vendor:'Hugging Face', amount:6.13, note:'', createdAt:'2026-09-11T12:00:00.000Z', updatedAt:'2026-09-11T12:00:00.000Z' }
+  ],
+  balanceSnapshots: [],
+  balanceReconciliations: []
 };
 
 var DATA = {
-  obligations: [
-    { day:12, name:'Trust / Access 3 Equity', sub:'Second mortgage · Personal · due today', amount:702.39, entity:'personal' },
-    { day:14, name:'GPT + Google + Zoom', sub:'NOFA recurring software', amount:41.86, entity:'business' },
-    { day:15, name:'IRS + Credit Card', sub:'Personal', amount:450.00, entity:'personal' },
-    { day:17, name:'Adobe + Amazon', sub:'Personal', amount:37.08, entity:'personal' },
-    { day:17, name:'Microsoft', sub:'NOFA recurring software', amount:13.77, entity:'business' },
-    { day:20, name:'Vercel + Ringover + Canva', sub:'NOFA business stack', amount:50.77, entity:'business' },
-    { day:25, name:'AMX + Credit Card + Johns Hopkins', sub:'Personal', amount:347.25, entity:'personal' },
-    { day:29, name:'Nokia + 10Web + Kimi', sub:'NOFA business stack', amount:164.75, entity:'business' }
-  ],
-
-  transactions: [
-    { date:'Sep 11', name:'Hugging Face', amount:-6.13, entity:'business', cat:'AI development / research', icon:'sparkle' },
-    { date:'Sep 11', name:'ElevenLabs', amount:-23.32, entity:'business', cat:'Recurring AI / voice', icon:'zap' },
-    { date:'Sep 10', name:'Continental Finance', amount:-82.00, entity:'personal', cat:'Credit card payment', icon:'card' },
-    { date:'Sep 09', name:'Alignable', amount:-31.80, entity:'business', cat:'Networking / operating', icon:'briefcase' },
-    { date:'Sep 09', name:'Warp.dev', amount:-10.00, entity:'business', cat:'AI development', icon:'zap' },
-    { date:'Sep 09', name:'Aspire MC', amount:-50.00, entity:'personal', cat:'Credit card payment', icon:'card' },
-    { date:'Sep 09', name:'Credit One Bank', amount:-20.00, entity:'personal', cat:'Credit card payment', icon:'card' },
-    { date:'Sep 09', name:'Kaiser', amount:-75.00, entity:'personal', cat:'Health', icon:'heart' },
-    { date:'Sep 08', name:'Warp.dev', amount:-20.00, entity:'business', cat:'AI development', icon:'zap' },
-    { date:'Sep 08', name:'Opus Pro', amount:-29.87, entity:'business', cat:'Operating / video marketing', icon:'sparkle' },
-    { date:'Sep 08', name:'Warp.dev', amount:-20.00, entity:'business', cat:'AI development', icon:'zap' },
-    { date:'Sep 08', name:'Concora Credit Payment', amount:-50.00, entity:'personal', cat:'Credit card payment', icon:'card' },
-    { date:'Sep 08', name:'Concora Credit Payment', amount:-50.00, entity:'personal', cat:'Credit card payment', icon:'card' },
-    { date:'Sep 08', name:'Temu', amount:-10.62, entity:'personal', cat:'Personal purchase', icon:'card' },
-    { date:'Sep 08', name:'Washington Post', amount:-12.72, entity:'personal', cat:'Subscription · actual posted amount', icon:'card' },
-    { date:'Sep 04', name:'Other Business Income', amount:795.00, entity:'personal', cat:'Income', icon:'banknote' },
-    { date:'Sep 03', name:'Progressive', amount:-89.07, entity:'personal', cat:'Auto insurance · actual posted amount', icon:'shield' },
-    { date:'Sep 03', name:'Apple.com / Bill', amount:-4.23, entity:'business', cat:'Apple charge · actual posted amount', icon:'card' },
-    { date:'Sep 02', name:'AWS', amount:-0.52, entity:'business', cat:'Cloud', icon:'zap' },
-    { date:'Sep 02', name:'Pinecone', amount:-51.50, entity:'business', cat:'AI infrastructure', icon:'zap' },
-    { date:'Sep 01', name:'Bon Appétit Phase 1', amount:4500.00, entity:'business', cat:'Client setup revenue', icon:'briefcase' },
-    { date:'Sep 01', name:'Existing Client', amount:47.95, entity:'business', cat:'Net recurring client cash', icon:'briefcase' }
-  ],
-
   recurringBusiness: [
-    { day:'01', name:'Google Workspace', amount:69.22 },
-    { day:'01', name:'Pinecone', amount:51.50 },
-    { day:'01', name:'FreshBooks', amount:43.00 },
-    { day:'02', name:'AWS', amount:0.52 },
-    { day:'06', name:'Alignable', amount:31.60, note:'September actual posted: $31.80' },
-    { day:'06', name:'Opus', amount:29.87, note:'Operating / video marketing subscription' },
-    { day:'13', name:'ElevenLabs', amount:23.32 },
-    { day:'13', name:'Warp', amount:20.00, note:'Fixed subscription; extra build credits tracked separately' },
-    { day:'14', name:'GPT + Google', amount:24.36 },
-    { day:'14', name:'Zoom', amount:17.50 },
-    { day:'16', name:'Apple', amount:1.02, note:'Budgeted recurring amount' },
-    { day:'17', name:'Microsoft', amount:13.77 },
-    { day:'20', name:'Vercel', amount:20.60 },
-    { day:'20', name:'Ringover', amount:15.17 },
-    { day:'20', name:'Canva', amount:15.00 },
-    { day:'22', name:'Calendly', amount:15.45 },
-    { day:'22', name:'Adobe', amount:21.19 },
-    { day:'27', name:'Spatial', amount:8.00 },
-    { day:'28', name:'Claude', amount:21.20, status:'canceled', note:'Canceled 08/21/2026 — excluded from future totals' },
-    { day:'29', name:'Nokia', amount:25.75 },
-    { day:'29', name:'10Web', amount:120.00 },
-    { day:'29', name:'Kimi / Moonshot', amount:19.00 },
-    { day:'30', name:'Wells Fargo', amount:15.00 }
+    { day:'01', name:'Google Workspace', amount:69.22, category:'Software & operating' },
+    { day:'01', name:'Pinecone', amount:51.50, category:'AI fixed subscriptions' },
+    { day:'01', name:'FreshBooks', amount:43.00, category:'Software & operating' },
+    { day:'02', name:'AWS', amount:0.52, category:'Web / hosting / telecom' },
+    { day:'06', name:'Alignable', amount:31.60, note:'September actual posted: $31.80', category:'Software & operating' },
+    { day:'06', name:'Opus', amount:29.87, note:'Operating / video marketing subscription', category:'Software & operating' },
+    { day:'13', name:'ElevenLabs', amount:23.32, category:'AI fixed subscriptions' },
+    { day:'13', name:'Warp', amount:20.00, note:'Fixed subscription; extra build credits tracked separately', category:'AI fixed subscriptions' },
+    { day:'14', name:'GPT + Google', amount:24.36, category:'Software & operating' },
+    { day:'14', name:'Zoom', amount:17.50, category:'Software & operating' },
+    { day:'16', name:'Apple', amount:1.02, note:'Budgeted recurring amount', category:'Other' },
+    { day:'17', name:'Microsoft', amount:13.77, category:'Web / hosting / telecom' },
+    { day:'20', name:'Vercel', amount:20.60, category:'Web / hosting / telecom' },
+    { day:'20', name:'Ringover', amount:15.17, category:'Web / hosting / telecom' },
+    { day:'20', name:'Canva', amount:15.00, category:'Software & operating' },
+    { day:'22', name:'Calendly', amount:15.45, category:'Software & operating' },
+    { day:'22', name:'Adobe', amount:21.19, category:'Software & operating' },
+    { day:'27', name:'Spatial', amount:8.00, category:'Software & operating' },
+    { day:'28', name:'Claude', amount:21.20, status:'canceled', note:'Canceled 08/21/2026 — excluded from future totals', category:'AI fixed subscriptions' },
+    { day:'29', name:'Nokia', amount:25.75, category:'Web / hosting / telecom' },
+    { day:'29', name:'10Web', amount:120.00, category:'Web / hosting / telecom' },
+    { day:'29', name:'Kimi / Moonshot', amount:19.00, category:'AI fixed subscriptions' },
+    { day:'30', name:'Wells Fargo', amount:15.00, category:'Software & operating' }
   ],
 
   recurringPersonal: [
-    { day:'01', name:'Progressive', amount:94.00, note:'Budget amount; September actual posted $89.07' },
-    { day:'05', name:'Credit Card', amount:53.53 },
-    { day:'05', name:'Credit Card', amount:50.00 },
-    { day:'08', name:'Kaiser', amount:75.00 },
-    { day:'09', name:'Credit Card', amount:50.00 },
-    { day:'09', name:'Credit Card', amount:50.00 },
-    { day:'12', name:'Trust / Access 3 Equity', amount:702.39, note:'Second mortgage · now paid by Farhad' },
-    { day:'13', name:'Washington Post', amount:4.24, note:'Budget amount; September actual posted $12.72' },
-    { day:'15', name:'Credit Card', amount:50.00 },
-    { day:'15', name:'IRS', amount:400.00 },
-    { day:'17', name:'Adobe', amount:21.19 },
-    { day:'17', name:'Amazon', amount:15.89 },
-    { day:'25', name:'AMX', amount:77.25 },
-    { day:'25', name:'Credit Card', amount:120.00 },
-    { day:'25', name:'Johns Hopkins', amount:150.00 },
-    { day:'27', name:'Attorney', amount:201.00, status:'inactive', note:'Paid off 07/25/2026 — excluded from future totals' },
-    { day:'30', name:'AT&T', amount:135.00 }
-  ],
-
-  cashflow: [
-    { m:'Sep', income:5342.95, expense:2649.33 },
-    { m:'Oct', income:2042.95, expense:2649.33, projected:true },
-    { m:'Nov', income:2042.95, expense:3249.33, projected:true },
-    { m:'Dec', income:2042.95, expense:2649.33, projected:true }
-  ],
-
-  forecastEvents: [
-    { d:0, label:'Trust / Access 3 Equity', amount:-702.39, entity:'personal' },
-    { d:2, label:'GPT + Google + Zoom', amount:-41.86, entity:'business' },
-    { d:3, label:'IRS + Credit Card', amount:-450.00, entity:'personal' },
-    { d:5, label:'Adobe + Amazon + Microsoft', amount:-50.85, entity:'mixed' },
-    { d:6, label:'Other Business income', amount:800.00, entity:'personal' },
-    { d:8, label:'Vercel + Ringover + Canva', amount:-50.77, entity:'business' },
-    { d:13, label:'AMX + Credit Card + Johns Hopkins', amount:-347.25, entity:'personal' },
-    { d:17, label:'Nokia + 10Web + Kimi', amount:-164.75, entity:'business' },
-    { d:18, label:'AT&T', amount:-135.00, entity:'personal' },
-    { d:19, label:'Existing client monthly cash', amount:47.95, entity:'business' },
-    { d:19, label:'Bon Appétit monthly gross begins', amount:295.00, entity:'business' },
-    { d:20, label:'Month-start NOFA recurring group', amount:-164.24, entity:'business' },
-    { d:20, label:'Progressive budget', amount:-94.00, entity:'personal' }
-  ],
-
-  aiSpend: [
-    { name:'Warp / Oz development', amount:50.00 },
-    { name:'Hugging Face', amount:6.13 }
-  ],
-
-  reportMix: {
-    nofa: [
-      ['Software & operating',304.79,'#2E63E7'],
-      ['Web / hosting / telecom',225.52,'#7550F0'],
-      ['AI fixed subscriptions',69.53,'#E8A23D'],
-      ['Other',1.00,'#2FBF71']
-    ],
-    personal: [
-      ['Trust / second mortgage',702.39,'#7550F0'],
-      ['IRS',400.00,'#2E63E7'],
-      ['Credit cards',373.53,'#E8A23D'],
-      ['Insurance & telecom',229.00,'#E85D75'],
-      ['Health',225.00,'#2FBF71'],
-      ['Other',118.57,'#94A3B8']
-    ]
-  }
+    { day:'01', name:'Progressive', amount:94.00, note:'Budget amount; September actual posted $89.07', category:'Insurance & telecom' },
+    { day:'05', name:'Credit Card', amount:53.53, category:'Credit cards' },
+    { day:'05', name:'Credit Card', amount:50.00, category:'Credit cards' },
+    { day:'08', name:'Kaiser', amount:75.00, category:'Health' },
+    { day:'09', name:'Credit Card', amount:50.00, category:'Credit cards' },
+    { day:'09', name:'Credit Card', amount:50.00, category:'Credit cards' },
+    { day:'12', name:'Trust / Access 3 Equity', amount:702.39, note:'Second mortgage · now paid by Farhad', category:'Trust / second mortgage' },
+    { day:'13', name:'Washington Post', amount:4.24, note:'Budget amount; September actual posted $12.72', category:'Other' },
+    { day:'15', name:'Credit Card', amount:50.00, category:'Credit cards' },
+    { day:'15', name:'IRS', amount:400.00, category:'IRS' },
+    { day:'17', name:'Adobe', amount:21.19, category:'Other' },
+    { day:'17', name:'Amazon', amount:15.89, category:'Other' },
+    { day:'25', name:'AMX', amount:77.25, category:'Other' },
+    { day:'25', name:'Credit Card', amount:120.00, category:'Credit cards' },
+    { day:'25', name:'Johns Hopkins', amount:150.00, category:'Health' },
+    { day:'27', name:'Attorney', amount:201.00, status:'inactive', note:'Paid off 07/25/2026 — excluded from future totals', category:'Other' },
+    { day:'30', name:'AT&T', amount:135.00, category:'Insurance & telecom' }
+  ]
 };
 var RING = { brand:['#2E63E7','#5F8DFF'], grape:['#7550F0','#9A78F8'], amber:['#E8A23D','#F5C063'], teal:['#14B8A6','#2DD4BF'] };
 var NAV = [
@@ -819,24 +813,156 @@ var NAV = [
 
 /* ================================================================
    STATE
+   Financial Truth Phase A: schema upgrades NEVER discard existing data.
+   loadStore() migrates old-shape data in place (backup + backfill +
+   verify) instead of resetting to SEED on a version mismatch, which was
+   the prior (destructive) behavior.
 ================================================================ */
+function sumBalances(store) { return (store.accounts || []).reduce(function (s, a) { return s + (a.balance || 0); }, 0); }
+function countRecords(store) {
+  return { accounts: (store.accounts || []).length, transactions: (store.transactions || []).length, ownerTransfers: (store.ownerTransfers || []).length };
+}
+function firstAccountIdByEntity(store, entity) {
+  var a = (store.accounts || []).filter(function (x) { return x.entity === entity && !x.archived; })[0];
+  return a ? a.id : null;
+}
+function migrateStore(oldStore, rawJson) {
+  var oldVersion = oldStore.v;
+  /* 1) Back up the complete pre-migration state before touching anything. */
+  try { localStorage.setItem(STORE_KEY + '-backup-v' + (oldVersion != null ? oldVersion : 'unknown') + '-' + Date.now(), rawJson); } catch (e) {}
+  var before = { balance: sumBalances(oldStore), counts: countRecords(oldStore) };
+  var migrated = JSON.parse(JSON.stringify(oldStore));
+  /* 2) Backfill new Financial Truth fields with safe, non-mutating defaults.
+     Pre-existing transactions/transfers are treated as already covered by
+     the user's current account balances (like an implicit reconciliation),
+     so they are marked includedInBalance:true but balanceApplied:false --
+     they must never be (re)applied. */
+  (migrated.transactions || []).forEach(function (t) {
+    if (t.includedInBalance === undefined) t.includedInBalance = true;
+    if (t.balanceApplied === undefined) t.balanceApplied = false;
+    if (t.reconciliationId === undefined) t.reconciliationId = null;
+  });
+  (migrated.ownerTransfers || []).forEach(function (t) {
+    if (t.balanceApplied === undefined) t.balanceApplied = false;
+    if (t.includedInBalance === undefined) t.includedInBalance = true;
+    if (t.fromAccountId === undefined) t.fromAccountId = firstAccountIdByEntity(migrated, t.direction === 'personal_to_nofa' ? 'personal' : 'business');
+    if (t.toAccountId === undefined) t.toAccountId = firstAccountIdByEntity(migrated, t.direction === 'personal_to_nofa' ? 'business' : 'personal');
+    /* Known historical correction: the original $732.39 NOFA->Personal owner
+       withdrawal already happened and is already reflected in current
+       balances. It must be historical/completed, never a future plan, and
+       must never be (re)applied. */
+    if (t.status === 'planned' && t.direction === 'nofa_to_personal' && Math.abs((t.amount || 0) - 732.39) < 0.005) {
+      t.status = 'completed'; t.balanceApplied = false; t.includedInBalance = true;
+    }
+  });
+  (migrated.accounts || []).forEach(function (a) {
+    if (a.lastReconciledAt === undefined) a.lastReconciledAt = null;
+    /* Known historical correction: Business Market Rate Savings belongs to
+       Other Business, not NOFA. */
+    if (a.id === 'a3' && a.entity === 'business') a.entity = 'other_business';
+  });
+  if (!Array.isArray(migrated.balanceReconciliations)) migrated.balanceReconciliations = [];
+  if (!Array.isArray(migrated.balanceSnapshots)) migrated.balanceSnapshots = [];
+  /* 3) Verify nothing was lost or altered before committing the migration. */
+  var after = { balance: sumBalances(migrated), counts: countRecords(migrated) };
+  var ok = Math.abs(after.balance - before.balance) < 0.005 &&
+    after.counts.accounts === before.counts.accounts &&
+    after.counts.transactions === before.counts.transactions &&
+    after.counts.ownerTransfers === before.counts.ownerTransfers;
+  if (!ok) {
+    try { reportUiError('Data migration check failed \u2014 kept your existing data untouched', new Error('balance/record count mismatch during migration')); } catch (e) {}
+    return oldStore;
+  }
+  migrated.v = SEED.v;
+  return migrated;
+}
+function loadStore() {
+  var raw;
+  try { raw = localStorage.getItem(STORE_KEY); } catch (e) { raw = null; }
+  if (!raw) return JSON.parse(JSON.stringify(SEED));
+  var d;
+  try { d = JSON.parse(raw); } catch (e) { return JSON.parse(JSON.stringify(SEED)); }
+  if (!d || !Array.isArray(d.accounts)) return JSON.parse(JSON.stringify(SEED));
+  if (d.v === SEED.v) return d;
+  return migrateStore(d, raw);
+}
 var state = {
   view: 'home', sidebarOpen: false, modal: null,
   acctFilter: 'all', txQ: '', txF: 'all', recQ: '',
   horizon: 30, aiOpen: false, confirmDeleteAcct: null, confirmReset: false,
-  store: (function () {
-    try {
-      var raw = localStorage.getItem(STORE_KEY);
-      if (raw) { var d = JSON.parse(raw); if (d && d.v === SEED.v) return d; }
-    } catch (e) {}
-    return JSON.parse(JSON.stringify(SEED));
-  })()
+  store: loadStore()
 };
+/* TEMPORARY DIAGNOSTIC LOGGING -- read-only, no logic change. Remove once
+   the reserve-derivation failure point is identified. */
+try {
+  console.log('[NOFA DIAG] 1) goals[0].current immediately after loadStore():',
+    state.store.goals && state.store.goals[0] ? state.store.goals[0].current : '(no goals[0])');
+} catch (e) { console.log('[NOFA DIAG] logging error at point 1:', e && e.message); }
 function persist() {
+  syncAiBudgetGoal();
+  syncReserveGoal();
+  upsertTodaySnapshot();
   try { localStorage.setItem(STORE_KEY, JSON.stringify(state.store)); } catch (e) {}
 }
 function findAcct(id) { return state.store.accounts.filter(function (a) { return a.id === id; })[0]; }
 function findGoal(id) { return state.store.goals.filter(function (g) { return g.id === id; })[0]; }
+
+/* ================================================================
+   BALANCE APPLY / REVERSE ENGINE — Financial Truth Phase A
+   A transaction or owner transfer only ever changes an account
+   balance once. balanceApplied tracks whether THIS engine has
+   already added its signed amount to the account; every reversal
+   checks that flag first so double-counting is structurally
+   impossible, and reconciled/imported history (balanceApplied:false)
+   is never touched.
+================================================================ */
+function applyAmountToAccount(accountId, amount) {
+  var a = findAcct(accountId);
+  if (a) a.balance += amount;
+}
+function reverseTransactionApply(tx) {
+  if (tx && tx.balanceApplied) {
+    applyAmountToAccount(tx.accountId, -tx.amount);
+    tx.balanceApplied = false;
+  }
+}
+/* Applies (or withholds) a transaction's amount based on the user's
+   "already included" declaration and posted/pending status. For
+   edits, call reverseTransactionApply(tx) FIRST (using the OLD
+   accountId/amount), mutate the fields, then call this (using the
+   NEW values) so the net effect is a clean reverse-then-reapply. */
+function computeTransactionApply(tx, alreadyIncluded) {
+  if (alreadyIncluded) {
+    /* Declared as already reflected in the account's current balance
+       (e.g. a bank screenshot whose shown balance already includes
+       it) — must never be applied, exactly like a reconciliation
+       baseline. */
+    tx.includedInBalance = true;
+    tx.balanceApplied = false;
+  } else if (tx.status === 'posted') {
+    applyAmountToAccount(tx.accountId, tx.amount);
+    tx.includedInBalance = true;
+    tx.balanceApplied = true;
+  } else {
+    tx.includedInBalance = false;
+    tx.balanceApplied = false;
+  }
+}
+function reverseOwnerTransferApply(t) {
+  if (t && t.balanceApplied) {
+    applyAmountToAccount(t.fromAccountId, t.amount);
+    applyAmountToAccount(t.toAccountId, -t.amount);
+    t.balanceApplied = false;
+  }
+}
+function applyOwnerTransferIfCompleted(t) {
+  if (t.status === 'completed' && !t.balanceApplied && t.fromAccountId && t.toAccountId) {
+    applyAmountToAccount(t.fromAccountId, -t.amount);
+    applyAmountToAccount(t.toAccountId, t.amount);
+    t.balanceApplied = true;
+    t.includedInBalance = true;
+  }
+}
 
 function recurringList(entity) {
   var key = entity === 'business' ? 'recurringBusiness' : 'recurringPersonal';
@@ -861,6 +987,275 @@ function ensureRecurringIds() {
   });
 }
 ensureRecurringIds();
+/* Self-healing data check, runs on every load (not just version-bump
+   migrations): a ranged income source (amountLow/amountHigh both set) must
+   never also carry a non-null .amount -- the Edit Income form previously had
+   no way to edit a range and always wrote a single .amount field (defaulting
+   to 0 for a ranged source with no .amount), which silently shadowed the
+   range in monthlyIncomeBaseline() and made forecasts look stuck/wrong even
+   though the original amountLow/amountHigh were never actually destroyed.
+   Clearing the stray .amount here restores correct range-based forecasting
+   immediately, with no user action required. */
+function ensureIncomeSourceIntegrity() {
+  var changed = false;
+  (state.store.incomeSources || []).forEach(function (s) {
+    if (s.amountLow != null && s.amountHigh != null && s.amount != null) {
+      s.amount = null;
+      changed = true;
+    }
+  });
+  if (changed) persist();
+}
+ensureIncomeSourceIntegrity();
+
+/* ================================================================
+   BALANCE SNAPSHOTS — one entry per calendar day, updated in place
+================================================================ */
+function upsertTodaySnapshot() {
+  var d = todayISO();
+  var list = state.store.balanceSnapshots;
+  var active = state.store.accounts.filter(function (a) { return !a.archived; });
+  var accounts = active.map(function (a) { return { id: a.id, balance: a.balance }; });
+  var business = active.filter(function (a) { return a.entity === 'business'; }).reduce(function (s, a) { return s + a.balance; }, 0);
+  var personal = active.filter(function (a) { return a.entity === 'personal'; }).reduce(function (s, a) { return s + a.balance; }, 0);
+  var otherBusiness = active.filter(function (a) { return a.entity === 'other_business'; }).reduce(function (s, a) { return s + a.balance; }, 0);
+  /* total must reflect ALL active accounts, not just business+personal. */
+  var total = active.reduce(function (s, a) { return s + a.balance; }, 0);
+  var last = list[list.length - 1];
+  if (last && last.date === d) {
+    last.accounts = accounts; last.total = total; last.business = business; last.personal = personal; last.otherBusiness = otherBusiness;
+    last.updatedAt = new Date().toISOString();
+  } else {
+    list.push({ id: 'bal-' + Date.now(), date: d, accounts: accounts, total: total, business: business, personal: personal, otherBusiness: otherBusiness, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() });
+    if (list.length > 365) state.store.balanceSnapshots = list.slice(-365);
+  }
+}
+function entityTrend(entity) {
+  var snaps = state.store.balanceSnapshots;
+  if (snaps.length < 2) return null;
+  var first = snaps[0][entity], latest = snaps[snaps.length - 1][entity];
+  if (!first) return null;
+  return { pct: ((latest - first) / Math.abs(first)) * 100, up: latest >= first };
+}
+
+/* ================================================================
+   AI BUILD SPEND — goal progress is derived, not manually edited
+================================================================ */
+function aiBudgetUsed() { return state.store.buildSpend.reduce(function (s, x) { return s + x.amount; }, 0); }
+function aiBudgetGoal() { return state.store.goals.filter(function (g) { return g.mode === 'spend'; })[0]; }
+function syncAiBudgetGoal() { var g = aiBudgetGoal(); if (g) g.current = aiBudgetUsed(); }
+
+/* ================================================================
+   NOFA PROTECTED RESERVE — "saved so far" is derived, not manually
+   edited (matches the AI Build Budget pattern above). Only the target
+   stays user-editable via the Edit Goal modal.
+================================================================ */
+function isNofaReserveGoal(g) { return !!g && (g.id === 'g1' || g.name === 'NOFA Protected Reserve'); }
+/* Current NOFA (business-entity) cash minus any owner withdrawals that are
+   still planned (not yet executed). Completed withdrawals are already
+   reflected in account balances and must not be subtracted again. */
+function nofaReserveSaved() {
+  var nofaCash = state.store.accounts.filter(function (a) { return !a.archived && a.entity === 'business'; }).reduce(function (s, a) { return s + a.balance; }, 0);
+  var plannedWithdrawals = state.store.ownerTransfers.filter(function (t) { return t.status === 'planned' && t.direction === 'nofa_to_personal'; }).reduce(function (s, t) { return s + t.amount; }, 0);
+  return nofaCash - plannedWithdrawals;
+}
+function syncReserveGoal() {
+  var g = state.store.goals.filter(isNofaReserveGoal)[0];
+  if (g) g.current = nofaReserveSaved();
+}
+/* One-time non-destructive repair, run once on every load (in addition to
+   syncReserveGoal() being wired into persist() for ongoing sync after every
+   later mutation): recompute the NOFA Protected Reserve goal's derived
+   "current" and, if it differs from what is already stored, persist it
+   immediately. Without this, the corrected figure only lived in memory for
+   the current session -- it was never written back to localStorage until
+   some unrelated action happened to call persist() next, so a fresh reload
+   (or a different browser/profile reading the same stale localStorage
+   entry) could keep showing the old manually-set value indefinitely. This
+   only ever touches this one goal's .current field; accounts, transactions,
+   recurring expenses, income sources, and forecast logic are untouched. */
+function repairReserveGoal() {
+  /* TEMPORARY DIAGNOSTIC LOGGING -- every console.log below is read-only
+     and purely observational; the actual control flow (find goal, compare,
+     conditionally set + persist) is byte-for-byte unchanged from before. */
+  console.log('[NOFA DIAG] 5) repairReserveGoal() is running');
+  var g = state.store.goals.filter(isNofaReserveGoal)[0];
+  if (!g) {
+    console.log('[NOFA DIAG] repairReserveGoal(): no matching reserve goal found (id "g1" / name "NOFA Protected Reserve") -- aborting');
+    return;
+  }
+  try {
+    var nofaCashDiag = state.store.accounts.filter(function (a) { return !a.archived && a.entity === 'business'; }).reduce(function (s, a) { return s + a.balance; }, 0);
+    var plannedWithdrawalsDiag = state.store.ownerTransfers.filter(function (t) { return t.status === 'planned' && t.direction === 'nofa_to_personal'; }).reduce(function (s, t) { return s + t.amount; }, 0);
+    console.log('[NOFA DIAG] 2) current NOFA business cash:', nofaCashDiag);
+    console.log('[NOFA DIAG] 3) planned unexecuted owner withdrawals total:', plannedWithdrawalsDiag);
+  } catch (e) { console.log('[NOFA DIAG] logging error at points 2/3:', e && e.message); }
+  var correct = nofaReserveSaved();
+  console.log('[NOFA DIAG] 4) derived reserve from nofaReserveSaved():', correct);
+  console.log('[NOFA DIAG] stored goals[0].current before comparison:', g.current);
+  var diffDiag = Math.abs((g.current || 0) - correct);
+  var willUpdate = diffDiag >= 0.005;
+  console.log('[NOFA DIAG] 6) difference detected:', diffDiag, '-> will update+persist:', willUpdate);
+  if (willUpdate) {
+    g.current = correct;
+    console.log('[NOFA DIAG] 7) persist() is about to be called');
+    persist();
+    console.log('[NOFA DIAG] 7) persist() returned');
+    console.log('[NOFA DIAG] 8) goals[0].current immediately after persist():', state.store.goals[0] && state.store.goals[0].current);
+    try {
+      var rawAfterDiag = localStorage.getItem(STORE_KEY);
+      var parsedAfterDiag = rawAfterDiag ? JSON.parse(rawAfterDiag) : null;
+      console.log('[NOFA DIAG] 9) value read back from localStorage immediately after persist:',
+        parsedAfterDiag && parsedAfterDiag.goals && parsedAfterDiag.goals[0] ? parsedAfterDiag.goals[0].current : '(could not read/parse)');
+    } catch (e) { console.log('[NOFA DIAG] logging error at point 9 (localStorage read-back):', e && e.message); }
+  } else {
+    console.log('[NOFA DIAG] 7) persist() was NOT called (no difference detected)');
+  }
+}
+repairReserveGoal();
+
+/* ================================================================
+   REPORTS — category mix + monthly cash flow derived from real data
+================================================================ */
+var CATEGORY_COLORS = {
+  'Software & operating':'#2E63E7', 'Web / hosting / telecom':'#7550F0', 'AI fixed subscriptions':'#E8A23D',
+  'Trust / second mortgage':'#7550F0', 'IRS':'#2E63E7', 'Credit cards':'#E8A23D',
+  'Insurance & telecom':'#E85D75', 'Health':'#2FBF71', 'Other':'#94A3B8'
+};
+var FALLBACK_PALETTE = ['#2E63E7','#7550F0','#E8A23D','#E85D75','#2FBF71','#94A3B8','#14B8A6','#F472B6'];
+function colorForCategory(cat, idx) { return CATEGORY_COLORS[cat] || FALLBACK_PALETTE[idx % FALLBACK_PALETTE.length]; }
+function computeCategoryMix(entity) {
+  var list = recurringList(entity).filter(function (r) { return !r.status; });
+  var byCat = {}, order = [];
+  list.forEach(function (r) {
+    var cat = r.category || 'Other';
+    if (!byCat[cat]) { byCat[cat] = 0; order.push(cat); }
+    byCat[cat] += r.amount;
+  });
+  return order.map(function (cat, i) { return [cat, byCat[cat], colorForCategory(cat, i)]; });
+}
+/* Standard pay-periods-per-year for known cadences, used instead of a naive
+   30/cadenceDays approximation. That approximation is measurably wrong for
+   biweekly income: 30/14 = 2.143 payments/month, but a true biweekly cadence
+   is 26 pay periods/year \u00f7 12 = 2.1667 payments/month. Monthly (30) and
+   weekly (7) also get their conventional 12 and 52 periods/year. Cadences
+   with no fixed recurrence (One-off/Variable, cadenceDays null) contribute
+   nothing to a recurring monthly projection. */
+var CADENCE_PERIODS_PER_YEAR = { 7: 52, 14: 26, 30: 12 };
+function cadenceMonthlyFactor(cadenceDays) {
+  if (!cadenceDays) return 0;
+  var periodsPerYear = CADENCE_PERIODS_PER_YEAR[cadenceDays] || (365.25 / cadenceDays);
+  return periodsPerYear / 12;
+}
+/* Returns { low, high, mid } monthly-equivalent totals across all confirmed +
+   expected income sources (pipeline is never counted). Ranged sources
+   (amountLow/amountHigh, e.g. "$750 \u2013 $850") keep their low and high ends
+   converted separately instead of collapsing to a single averaged figure, so
+   callers can show a true projected range. */
+function monthlyIncomeBaseline() {
+  var low = 0, high = 0;
+  state.store.incomeSources.filter(function (s) { return s.cashStatus === 'confirmed' || s.cashStatus === 'expected'; }).forEach(function (s) {
+    var factor = cadenceMonthlyFactor(s.cadenceDays);
+    if (s.amount != null) {
+      low += s.amount * factor;
+      high += s.amount * factor;
+    } else if (s.amountLow != null && s.amountHigh != null) {
+      low += s.amountLow * factor;
+      high += s.amountHigh * factor;
+    }
+  });
+  return { low: low, high: high, mid: (low + high) / 2 };
+}
+function monthlyExpenseBaseline() {
+  var biz = recurringList('business').filter(function (r) { return !r.status; }).reduce(function (s, r) { return s + r.amount; }, 0);
+  var per = recurringList('personal').filter(function (r) { return !r.status; }).reduce(function (s, r) { return s + r.amount; }, 0);
+  return biz + per;
+}
+function computeMonthlyCashflow(numMonths) {
+  var out = [], now = new Date();
+  var expenseBaseline = monthlyExpenseBaseline(), incomeBaseline = monthlyIncomeBaseline();
+  for (var i = 0; i < numMonths; i++) {
+    var d = new Date(now.getFullYear(), now.getMonth() + i, 1);
+    var label = MONTHS[d.getMonth()];
+    if (i === 0) {
+      var monthTx = state.store.transactions.filter(function (t) {
+        var td = parseISO(t.date);
+        return td.getFullYear() === d.getFullYear() && td.getMonth() === d.getMonth();
+      });
+      var inc = monthTx.filter(function (t) { return t.amount > 0; }).reduce(function (s, t) { return s + t.amount; }, 0);
+      var exp = monthTx.filter(function (t) { return t.amount < 0; }).reduce(function (s, t) { return s + Math.abs(t.amount); }, 0);
+      out.push({ m: label, income: inc, expense: exp, projected: false });
+    } else {
+      out.push({ m: label, income: incomeBaseline.mid, incomeLow: incomeBaseline.low, incomeHigh: incomeBaseline.high, expense: expenseBaseline, projected: true });
+    }
+  }
+  return out;
+}
+
+/* ================================================================
+   OBLIGATIONS — derived from live, active recurring expenses
+================================================================ */
+function upcomingObligations(withinDays) {
+  var base = todayBase(), list = [];
+  ['business','personal'].forEach(function (entity) {
+    recurringList(entity).filter(function (r) { return !r.status; }).forEach(function (r) {
+      var occ = nextOccurrenceDate(r.day, base);
+      var d = daysBetween(base, occ);
+      if (d >= 0 && d <= withinDays) {
+        list.push({
+          day: pad2(occ.getDate()), month: MONTHS[occ.getMonth()].toUpperCase(),
+          name: r.name, sub: (entity === 'business' ? 'NOFA recurring' : 'Personal recurring') + (r.note ? ' \u00b7 ' + r.note : ''),
+          amount: r.amount, entity: entity, _d: d
+        });
+      }
+    });
+  });
+  list.sort(function (a, b) { return a._d - b._d; });
+  return list;
+}
+
+/* ================================================================
+   KNOWN FORECAST (deterministic) —
+   available cash - confirmed outflows - scheduled obligations
+   + confirmed inflows = projected cleared cash.
+   Only forward-looking scheduled items are added; current account
+   balances are assumed to already reflect posted + pending activity,
+   so pending transactions are never subtracted a second time here.
+================================================================ */
+function scheduledEvents(horizonDays) {
+  var events = [], base = todayBase();
+  ['business','personal'].forEach(function (entity) {
+    recurringList(entity).filter(function (r) { return !r.status; }).forEach(function (r) {
+      var occ = nextOccurrenceDate(r.day, base);
+      var d = daysBetween(base, occ);
+      if (d >= 0 && d <= horizonDays) events.push({ d: d, amount: -Math.abs(r.amount), label: r.name, entity: entity, kind:'recurring' });
+    });
+  });
+  state.store.incomeSources.filter(function (s) { return s.cashStatus === 'confirmed' && s.nextDate; }).forEach(function (s) {
+    var occ = parseISO(s.nextDate), d = daysBetween(base, occ);
+    if (d >= 0 && d <= horizonDays) events.push({ d: d, amount: Math.abs(s.amount || 0), label: s.name, entity: s.entity || 'business', kind:'income' });
+  });
+  state.store.ownerTransfers.filter(function (t) { return t.status === 'planned' && t.date; }).forEach(function (t) {
+    var occ = parseISO(t.date), d = daysBetween(base, occ);
+    if (d >= 0 && d <= horizonDays) {
+      var dirLabel = t.direction === 'nofa_to_personal' ? 'NOFA \u2192 Personal' : 'Personal \u2192 NOFA';
+      /* Net-zero on the combined balance line (cash moves between entities, not out of the household); still visible in the timeline. */
+      events.push({ d: d, amount: 0, label: (t.note ? t.note + ' \u00b7 ' : '') + dirLabel, entity:'mixed', kind:'owner-transfer', transferAmount: t.amount });
+    }
+  });
+  return events;
+}
+function computeKnownForecast(horizonDays) {
+  var start = state.store.accounts.filter(function (a) { return !a.archived; }).reduce(function (s, a) { return s + a.balance; }, 0);
+  var events = scheduledEvents(horizonDays);
+  var byDay = {};
+  events.forEach(function (e) { byDay[e.d] = (byDay[e.d] || 0) + e.amount; });
+  var bal = [start];
+  for (var d = 1; d <= horizonDays; d++) bal.push(bal[d - 1] + (byDay[d] || 0));
+  var inflow = events.filter(function (e) { return e.amount > 0; }).reduce(function (s, e) { return s + e.amount; }, 0);
+  var outflow = events.filter(function (e) { return e.amount < 0; }).reduce(function (s, e) { return s + Math.abs(e.amount); }, 0);
+  return { start: start, events: events, byDay: byDay, bal: bal, inflow: inflow, outflow: outflow, net: inflow - outflow, end: bal[horizonDays] };
+}
 
 /* ================================================================
    TOASTS
@@ -932,7 +1327,10 @@ function barChartHTML(data, height, anim) {
       var net = d.income - d.expense;
       return '<div class="grp">' +
         '<div class="tip"><b>' + d.m + (d.projected ? ' \u00b7 projected' : '') + '</b>' +
-        '<span class="tl"><i class="dot leaf"></i>Income <span class="m2">' + money(d.income, 0) + '</span></span>' +
+        '<span class="tl"><i class="dot leaf"></i>Income <span class="m2">' +
+        (d.projected && d.incomeLow != null && d.incomeHigh != null && Math.abs(d.incomeHigh - d.incomeLow) >= 0.005
+          ? money(d.incomeLow, 0) + '\u2013' + money(d.incomeHigh, 0)
+          : money(d.income, 0)) + '</span></span>' +
         '<span class="tl" style="margin-top:2px"><i class="dot coral"></i>Expenses <span class="m2">' + money(d.expense, 0) + '</span></span>' +
         '<div class="net">' + (net >= 0 ? '+' : '\u2212') + money(Math.abs(net), 0) + ' net</div></div>' +
         '<div class="bar in" style="height:' + Math.max(d.income / max * 100, 2) + '%;animation-delay:' + (gi * 90) + 'ms"></div>' +
@@ -955,38 +1353,31 @@ function donutHTML(slices, size, stroke, centerLabel) {
       return '<div><span class="sq" style="background:' + s[2] + '"></span><span class="dn">' + s[0] + '</span><span class="da">' + money(s[1]) + '</span><span class="dp">' + Math.round(s[1] / total * 100) + '%</span></div>';
     }).join('') + '</div></div>';
 }
-function forecastSeries(days, start) {
-  var byDay = {};
-  DATA.forecastEvents.forEach(function (e) { if (e.d >= 1 && e.d <= days) byDay[e.d] = (byDay[e.d] || 0) + e.amount; });
-  var bal = [start];
-  for (var d = 1; d <= days; d++) bal.push(bal[d - 1] + (byDay[d] || 0));
-  return { bal: bal, byDay: byDay };
-}
-function fcGeom(days, start) {
-  var s = forecastSeries(days, start);
+function fcGeom(days) {
+  var f = computeKnownForecast(days);
   var W = 760, H = 216, PL = 14, PR = 14, PT = 26, PB = 26;
-  var lo = Math.min.apply(null, s.bal), hi = Math.max.apply(null, s.bal), pad = (hi - lo) * .08 || 10;
+  var lo = Math.min.apply(null, f.bal), hi = Math.max.apply(null, f.bal), pad = (hi - lo) * .08 || 10;
   var y0 = lo - pad, y1 = hi + pad;
   return {
-    s: s, W: W, H: H, PL: PL, PR: PR, PT: PT, PB: PB,
+    f: f, W: W, H: H, PL: PL, PR: PR, PT: PT, PB: PB,
     X: function (i) { return PL + (i / days) * (W - PL - PR); },
     Y: function (v) { return H - PB - ((v - y0) / (y1 - y0)) * (H - PT - PB); },
     grid: [y0, (y0 + y1) / 2, y1]
   };
 }
-function forecastChartHTML(days, start) {
-  var G = fcGeom(days, start), gid = uid();
-  var line = G.s.bal.map(function (v, i) { return (i ? 'L' : 'M') + G.X(i).toFixed(1) + ' ' + G.Y(v).toFixed(1); }).join(' ');
-  var evs = DATA.forecastEvents.filter(function (e) { return e.d >= 1 && e.d <= days; });
+function forecastChartHTML(days) {
+  var G = fcGeom(days), gid = uid();
+  var line = G.f.bal.map(function (v, i) { return (i ? 'L' : 'M') + G.X(i).toFixed(1) + ' ' + G.Y(v).toFixed(1); }).join(' ');
+  var evs = G.f.events.filter(function (e) { return e.d >= 1 && e.d <= days && e.kind !== 'owner-transfer'; });
   var ticks = [0, Math.round(days * .25), Math.round(days * .5), Math.round(days * .75), days];
   var grid = G.grid.map(function (v) {
     return '<line x1="' + G.PL + '" x2="' + (G.W - G.PR) + '" y1="' + G.Y(v).toFixed(1) + '" y2="' + G.Y(v).toFixed(1) + '" stroke="#EDF0F4"/>' +
       '<text x="' + G.PL + '" y="' + (G.Y(v) - 5).toFixed(1) + '" font-size="9" fill="#9AA6B5" font-family="Spline Sans Mono,monospace">' + money(v, 0) + '</text>';
   }).join('');
   var markers = evs.map(function (e, i) {
-    return '<circle cx="' + (G.X(e.d) + (i % 2 ? 4 : -4)).toFixed(1) + '" cy="' + G.Y(G.s.bal[e.d]).toFixed(1) + '" r="' + (e.amount > 0 ? 4 : 3.5) + '" fill="' + (e.amount > 0 ? '#2FBF71' : '#E85D75') + '" stroke="#fff" stroke-width="1.5"/>';
+    return '<circle cx="' + (G.X(e.d) + (i % 2 ? 4 : -4)).toFixed(1) + '" cy="' + G.Y(G.f.bal[e.d]).toFixed(1) + '" r="' + (e.amount > 0 ? 4 : 3.5) + '" fill="' + (e.amount > 0 ? '#2FBF71' : '#E85D75') + '" stroke="#fff" stroke-width="1.5"/>';
   }).join('');
-  return '<div class="fcwrap" data-days="' + days + '" data-start="' + start + '">' +
+  return '<div class="fcwrap" data-days="' + days + '">' +
     '<svg viewBox="0 0 ' + G.W + ' ' + G.H + '">' +
     '<defs><linearGradient id="' + gid + 'a" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#2E63E7" stop-opacity=".26"/><stop offset="1" stop-color="#2E63E7" stop-opacity="0"/></linearGradient>' +
     '<linearGradient id="' + gid + 'l" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#1F4FC4"/><stop offset="1" stop-color="#5F8DFF"/></linearGradient></defs>' +
@@ -1003,6 +1394,13 @@ function forecastChartHTML(days, start) {
 /* ================================================================
    SHARED HTML BUILDERS
 ================================================================ */
+/* Three account/transaction entities exist: 'business' (NOFA),
+   'personal' (Farhad personal), and 'other_business' (a separate
+   business, never NOFA cash). These helpers give a consistent
+   third visual treatment using existing tile/chip classes only. */
+function entityTileClass(entity) { return entity === 'business' ? 'brand' : entity === 'other_business' ? 'slate' : 'grape'; }
+function entityChipClass(entity) { return entity === 'business' ? 'nofa' : entity === 'other_business' ? 'amber' : 'personal'; }
+function entityLabel(entity) { return entity === 'business' ? 'NOFA' : entity === 'other_business' ? 'Other Business' : 'Personal'; }
 function cardHead(icon, tint, title, sub, right) {
   return '<div class="chead"><div class="chead-l"><span class="tile ' + tint + '">' + ic(icon, 16) + '</span><div class="minw0"><p class="chead-t">' + title + '</p>' + (sub ? '<p class="chead-s">' + sub + '</p>' : '') + '</div></div>' + (right || '') + '</div>';
 }
@@ -1024,19 +1422,23 @@ function hchip(icon, color, text, extra) {
   return '<span class="hchip' + (extra ? ' ' + extra : '') + '"><span style="color:' + color + ';display:flex">' + ic(icon, 13) + '</span>' + text + '</span>';
 }
 function heroHTML(total, initial) {
-  var hour = new Date().getHours();
+  var now = new Date();
+  var hour = now.getHours();
   var greet = hour < 12 ? 'Good morning' : hour < 18 ? 'Good afternoon' : 'Good evening';
   var name = state.store.profile.name ? ', ' + esc(state.store.profile.name) : '';
+  var reserve = state.store.goals[0];
+  var reservePct = Math.round(Math.min(reserve.current / Math.max(reserve.target, 1), 1) * 100);
+  var obligCount = upcomingObligations(30).length;
   return '<section class="hero" id="hero">' + ridgeScene('day', true) + '<div class="hero-grain"></div>' +
     '<div class="hero-body"><p class="greet">' + greet + name + '</p>' +
     '<h1>Your Financial<br/><span class="it">Command Center</span></h1>' +
     '<p class="hero-sub">Track<i>\u00b7</i>Plan<i>\u00b7</i>Build<i>\u00b7</i><b>Live Freer</b></p>' +
     '<div class="hero-chips">' +
     hchip('wallet', 'var(--b300)', money(total) + ' available') +
-    hchip('target', 'var(--l300)', 'Reserve 87% funded') +
-    hchip('clock', '#FCD34D', '5 obligations in September', 'hidesm') +
+    hchip('target', 'var(--l300)', 'Reserve ' + reservePct + '% funded') +
+    hchip('clock', '#FCD34D', obligCount + ' obligations in the next 30 days', 'hidesm') +
     '</div></div>' +
-    '<div class="hero-side"><div class="hero-date"><p class="d1">Friday</p><p class="d2">September 12, 2025</p></div>' +
+    '<div class="hero-side"><div class="hero-date"><p class="d1">' + WEEKDAYS[now.getDay()] + '</p><p class="d2">' + MONTHS[now.getMonth()] + ' ' + now.getDate() + ', ' + now.getFullYear() + '</p></div>' +
     '<button class="bellbtn" data-action="bell" aria-label="Notifications">' + ic('bell', 16) + '<i></i></button>' +
     '<div class="avwrap"><div class="avatar av40">' + initial + '</div><span class="sdot"></span></div></div></section>';
 }
@@ -1061,36 +1463,40 @@ function reservesCard(rv) {
     '<div class="push"></div><button class="btn ghost wide" data-action="nav" data-view="reserves" style="margin-top:24px">' + ic('target', 15) + 'Manage Goals</button></div>';
 }
 function aiCard(rv) {
-  var g = state.store.goals[1], p = Math.min(g.current / g.target * 100, 100);
-  var spend = DATA.aiSpend.reduce(function (s, x) { return s + x.amount; }, 0);
+  var g = aiBudgetGoal(), p = Math.min(g.current / g.target * 100, 100);
+  var spend = state.store.buildSpend;
   return '<div class="card pad hfull fcol ' + rv + '">' + cardHead('sparkle', 'grape', 'AI Build Budget', 'Monthly cap') +
     '<div class="aic">' + ringHTML(p, 118, 11, RING.grape[0], RING.grape[1], '<span class="rv big">' + Math.round(p) + '%</span><span class="rl">used</span>', 140) + '</div>' +
-    '<p class="aiu"><span class="b">$' + g.current + '</span> used</p>' +
+    '<p class="aiu"><span class="b">' + money(g.current, 0) + '</span> used</p>' +
     '<p class="ais"><b>' + money(g.target - g.current, 0) + '</b> remaining \u00b7 of <span class="mono">' + money(g.target, 0) + '</span> monthly</p>' +
     '<p class="keep">' + ic('sparkle', 14) + 'Keep building.</p>' +
-    (state.aiOpen ? '<div class="spendlist">' + DATA.aiSpend.map(function (x) { return '<div><span>' + x.name + '</span><span class="mono">' + money(x.amount) + '</span></div>'; }).join('') +
-      '<div><span>Tracked this month</span><span class="mono">\u2248 ' + money(spend) + '</span></div></div>' : '') +
+    (state.aiOpen ? '<div class="spendlist">' + spend.map(function (x) {
+        return '<div><span>' + esc(x.vendor) + ' \u00b7 ' + fmtShort(x.date) + '</span><span style="display:flex;align-items:center;gap:8px"><span class="mono">' + money(x.amount) + '</span><button class="act danger" data-action="delete-build-spend" data-id="' + x.id + '" title="Delete">' + ic('trash', 12) + '</button></span></div>';
+      }).join('') +
+      '<div><span>Tracked total</span><span class="mono">\u2248 ' + money(g.current) + '</span></div></div>' +
+      '<button class="btn ghost wide" style="margin-top:12px" data-action="modal" data-modal="add-build-spend">' + ic('plus', 14) + 'Add Spend</button>' : '') +
     '<button class="btn ghost wide push" data-action="ai-spend" style="margin-top:20px">' + (state.aiOpen ? 'Hide Spend' : 'View Spend') + '</button></div>';
 }
 function obligationsCard(rv) {
-  var sumT = DATA.obligations.reduce(function (s, o) { return s + o.amount; }, 0);
+  var list = upcomingObligations(30);
+  var sumT = list.reduce(function (s, o) { return s + o.amount; }, 0);
   return '<div class="card pad hfull fcol ' + rv + '">' +
-    cardHead('calendar', 'coral', 'Upcoming Obligations', DATA.obligations.length + ' items \u00b7 ' + money(sumT) + ' total', viewAllBtn('recurring')) +
-    '<div class="rows">' + DATA.obligations.map(function (o) {
-      return '<div class="rowitem"><div class="daybox"><p class="m">SEP</p><p class="d">' + o.day + '</p></div>' +
-        '<div class="rowmain"><p class="rowt">' + o.name + '</p><p class="rowsub">' + o.sub + '</p></div>' +
+    cardHead('calendar', 'coral', 'Upcoming Obligations', list.length + ' items in 30 days \u00b7 ' + money(sumT) + ' total', viewAllBtn('recurring')) +
+    '<div class="rows">' + (list.length ? list.map(function (o) {
+      return '<div class="rowitem"><div class="daybox"><p class="m">' + o.month + '</p><p class="d">' + o.day + '</p></div>' +
+        '<div class="rowmain"><p class="rowt">' + esc(o.name) + '</p><p class="rowsub">' + esc(o.sub) + '</p></div>' +
         '<span class="chip ' + (o.entity === 'business' ? 'nofa' : 'personal') + '">' + (o.entity === 'business' ? 'NOFA' : 'Personal') + '</span>' +
         '<p class="amt">' + money(o.amount) + '</p></div>';
-    }).join('') + '</div></div>';
+    }).join('') : '<p class="nomatch">Nothing scheduled in the next 30 days.</p>') + '</div></div>';
 }
 function transactionsCard(rv) {
-  var rows = DATA.transactions.slice(0, 5);
+  var rows = state.store.transactions.slice().sort(function (a, b) { return b.date.localeCompare(a.date) || String(b.id).localeCompare(String(a.id)); }).slice(0, 5);
   var net = rows.reduce(function (s, t) { return s + t.amount; }, 0);
   return '<div class="card pad hfull fcol ' + rv + '">' +
     cardHead('swap', 'brand', 'Recent Transactions', 'Latest activity \u00b7 net ' + (net >= 0 ? '+' : '\u2212') + money(Math.abs(net)), viewAllBtn('transactions')) +
     '<div class="rows">' + rows.map(function (t) {
-      return '<div class="rowitem"><span class="tile ' + (t.entity === 'business' ? 'brand' : 'grape') + '">' + ic(t.icon, 15) + '</span>' +
-        '<div class="rowmain"><p class="rowt">' + t.name + '</p><p class="rowsub">' + t.date + ' \u00b7 ' + (t.entity === 'business' ? 'NOFA' : 'Personal') + '</p></div>' +
+      return '<div class="rowitem"><span class="tile ' + entityTileClass(t.entity) + '">' + ic(t.icon || (t.amount > 0 ? 'banknote' : 'card'), 15) + '</span>' +
+        '<div class="rowmain"><p class="rowt">' + esc(t.name) + '</p><p class="rowsub">' + fmtShort(t.date) + ' \u00b7 ' + entityLabel(t.entity) + '</p></div>' +
         '<p class="amt ' + (t.amount > 0 ? 'pos' : 'neg') + '">' + (t.amount > 0 ? '+' : '\u2212') + money(Math.abs(t.amount)) + '</p></div>';
     }).join('') + '</div></div>';
 }
@@ -1115,36 +1521,53 @@ function homeView(anim) {
   var active = st.accounts.filter(function (a) { return !a.archived; });
   var biz = active.filter(function (a) { return a.entity === 'business'; }).reduce(function (s, a) { return s + a.balance; }, 0);
   var per = active.filter(function (a) { return a.entity === 'personal'; }).reduce(function (s, a) { return s + a.balance; }, 0);
-  var total = biz + per;
-  var bizM = DATA.recurringBusiness.filter(function (r) { return !r.status; }).reduce(function (s, r) { return s + r.amount; }, 0);
-  var perM = DATA.recurringPersonal.filter(function (r) { return !r.status; }).reduce(function (s, r) { return s + r.amount; }, 0);
-  var buildLeft = st.goals[1].target - st.goals[1].current;
+  /* Total Available Cash must include EVERY active account (including
+     other_business), never silently drop a bucket from the headline. */
+  var total = active.reduce(function (s, a) { return s + a.balance; }, 0);
+  var bizM = recurringList('business').filter(function (r) { return !r.status; }).reduce(function (s, r) { return s + r.amount; }, 0);
+  var perM = recurringList('personal').filter(function (r) { return !r.status; }).reduce(function (s, r) { return s + r.amount; }, 0);
+  var aiGoal = aiBudgetGoal();
+  var buildLeft = aiGoal.target - aiGoal.current;
   var initial = (st.profile.name || 'N')[0].toUpperCase();
+  var f7 = computeKnownForecast(7);
+  var plannedWithdrawal = st.ownerTransfers.filter(function (t) { return t.status === 'planned'; }).sort(function (a, b) { return a.date.localeCompare(b.date); })[0];
+  var nextIncome = st.incomeSources.filter(function (s) { return s.cashStatus !== 'pipeline' && s.nextDate; }).sort(function (a, b) { return a.nextDate.localeCompare(b.nextDate); })[0];
+  var reserve = st.goals[0];
+  var reservePct = Math.round(Math.min(reserve.current / Math.max(reserve.target, 1), 1) * 100);
+  var bizTrend = entityTrend('business'), perTrend = entityTrend('personal');
+  var personal7 = upcomingObligations(7).filter(function (o) { return o.entity === 'personal'; }).reduce(function (s, o) { return s + o.amount; }, 0);
+  var nextPersonalBill = upcomingObligations(30).filter(function (o) { return o.entity === 'personal'; })[0];
+  var now = new Date();
   return '<div style="display:flex;flex-direction:column;gap:20px">' +
     heroHTML(total, initial) +
     '<div class="card" style="margin-top:-8px;padding:12px 16px;border-left:4px solid #2E63E7;background:linear-gradient(90deg,#fff,#f6f9ff)">' +
     '<div style="display:flex;justify-content:space-between;gap:18px;flex-wrap:wrap;align-items:center">' +
-    '<div><b style="font-size:12px">Current data: Sep 12, 2026</b><span style="font-size:11px;color:#64748B;margin-left:8px">NOFA checking $4,358.68 · Personal $466.46 · Business savings $1.45</span></div>' +
-    '<div style="font-size:11px;color:#64748B">Planned owner withdrawal: <b style="color:#101E33">$732.39</b> · Next income: <b style="color:#101E33">$750–$850 on Sep 18</b></div>' +
-    '</div></div>' +
+    '<div><b style="font-size:12px">Current data: ' + MONTHS[now.getMonth()] + ' ' + now.getDate() + ', ' + now.getFullYear() + '</b><span style="font-size:11px;color:#64748B;margin-left:8px">' +
+    active.map(function (a) { return esc(a.name) + ' ' + money(a.balance); }).join(' \u00b7 ') + '</span></div>' +
+    '<div style="font-size:11px;color:#64748B">' +
+    (plannedWithdrawal ? 'Planned owner withdrawal: <b style="color:#101E33">' + money(plannedWithdrawal.amount) + '</b>' : 'No planned owner withdrawal') +
+    (nextIncome ? ' \u00b7 Next income: <b style="color:#101E33">' + esc(nextIncome.display) + ' on ' + fmtShort(nextIncome.nextDate) + '</b>' : '') +
+    '</div></div></div>' +
     '<section class="kpis">' +
     kpi({ tint:'brand', icon:'wallet', label:'Total Available Cash', val:money(total), sub:'Across ' + active.length + ' accounts \u00b7 updates live', view:'accounts', rv:rv('d1') }) +
-    kpi({ tint:'coral', icon:'calendar', label:'Next 7 Days', val:'$1,246.12', sub:'Scheduled outflow \u00b7 Sep 12\u201318', view:'forecast', rv:rv('d1') }) +
-    kpi({ tint:'leaf', icon:'trend', label:'Next Income', val:'$750 \u2013 $850', sub:'Other Business \u00b7 biweekly', view:'income', rv:rv('d2') }) +
-    kpi({ tint:'grape', icon:'shield', label:'Overall Status', val:'Focused', dot:true, sub:'Cash position healthy \u00b7 reserve 87%', view:'reports', rv:rv('d2') }) +
+    kpi({ tint:'coral', icon:'calendar', label:'Next 7 Days', val:money(f7.outflow), sub:'Scheduled outflow \u00b7 ' + fmtShort(todayISO()) + '\u2013' + dlabel(7), view:'forecast', rv:rv('d1') }) +
+    kpi({ tint:'leaf', icon:'trend', label:'Next Income', val: nextIncome ? esc(nextIncome.display) : '\u2014', sub: nextIncome ? esc(nextIncome.name) + ' \u00b7 ' + fmtShort(nextIncome.nextDate) : 'None scheduled', view:'income', rv:rv('d2') }) +
+    kpi({ tint:'grape', icon:'shield', label:'Overall Status', val: f7.end >= 0 ? 'Focused' : 'Attention', dot:true, sub:'Cash position ' + (f7.end >= 0 ? 'healthy' : 'tight') + ' \u00b7 reserve ' + reservePct + '%', view:'reports', rv:rv('d2') }) +
     '</section>' +
     '<section class="duo">' +
-    '<div class="' + rv('d2') + '">' + entityCard({ variant:'business', title:'NOFA Business', balance:biz, trend:'Client-funded', up:true, spark:st.accounts[0].spark,
-      metrics:[['Monthly Expenses', money(bizM)], ['Reserve Target', '$4,000'], ['Build Budget', money(buildLeft, 0) + ' left']] }) + '</div>' +
-    '<div class="' + rv('d3') + '">' + entityCard({ variant:'personal', title:'Personal', balance:per, trend:'\u22121.4% this month', up:false, spark:st.accounts[1].spark,
-      metrics:[['Monthly Expenses', money(perM)], ['Next Major Bill', money(702.39)], ['Cash Position', 'Tight']] }) + '</div>' +
+    '<div class="' + rv('d2') + '">' + entityCard({ variant:'business', title:'NOFA Business', balance:biz,
+      trend: bizTrend ? (bizTrend.up ? '+' : '\u2212') + Math.abs(bizTrend.pct).toFixed(1) + '% since tracking began' : 'Tracking started today', up: bizTrend ? bizTrend.up : true, spark:st.accounts[0].spark,
+      metrics:[['Monthly Expenses', money(bizM)], ['Reserve Target', money(reserve.target, 0)], ['Build Budget', money(buildLeft, 0) + ' left']] }) + '</div>' +
+    '<div class="' + rv('d3') + '">' + entityCard({ variant:'personal', title:'Personal', balance:per,
+      trend: perTrend ? (perTrend.up ? '+' : '\u2212') + Math.abs(perTrend.pct).toFixed(1) + '% since tracking began' : 'Tracking started today', up: perTrend ? perTrend.up : true, spark:st.accounts[1].spark,
+      metrics:[['Monthly Expenses', money(perM)], ['Next Major Bill', nextPersonalBill ? money(nextPersonalBill.amount) : '\u2014'], ['Cash Position', per < personal7 ? 'Tight' : 'Stable']] }) + '</div>' +
     '</section>' +
     '<section class="row12">' +
     '<div class="c5 ' + rv('d3') + '">' + reservesCard('') + '</div>' +
     '<div class="c3 ' + rv('d3') + '">' + aiCard('') + '</div>' +
     '<div class="c4 ' + rv('d4') + '"><div class="card pad hfull">' + cardHead('chart', 'slate', 'Monthly Cash Flow', 'Income vs expenses') +
-    '<div style="margin-top:20px">' + barChartHTML(DATA.cashflow, 180, anim) + '</div>' +
-    '<p style="margin-top:16px;font-size:11px;color:#94A3B8">November projected from the recurring baseline.</p></div></div>' +
+    '<div style="margin-top:20px">' + barChartHTML(computeMonthlyCashflow(4), 180, anim) + '</div>' +
+    '<p style="margin-top:16px;font-size:11px;color:#94A3B8">Future months projected from the recurring + confirmed/expected income baseline.</p></div></div>' +
     '</section>' +
     '<section class="row12">' +
     '<div class="c5 ' + rv('d4') + '">' + obligationsCard('') + '</div>' +
@@ -1159,13 +1582,12 @@ function homeView(anim) {
    ACCOUNTS VIEW
 ================================================================ */
 function accountCard(a) {
-  var biz = a.entity === 'business';
   var spark = a.spark && a.spark.length ? a.spark : genSpark(Math.abs(a.balance) + a.name.length * 7);
   var confirming = state.confirmDeleteAcct === a.id;
   return '<div class="card pad fcol acct' + (a.archived ? ' arch' : '') + '">' +
-    '<div class="acct-top"><div class="acct-id"><span class="tile ' + (biz ? 'brand' : 'grape') + '">' + ic('bank', 16) + '</span>' +
+    '<div class="acct-top"><div class="acct-id"><span class="tile ' + entityTileClass(a.entity) + '">' + ic('bank', 16) + '</span>' +
     '<div class="minw0"><p class="acct-name">' + esc(a.name) + '</p><p class="acct-type">' + esc(a.type) + '</p></div></div>' +
-    (a.archived ? '<span class="chip muted">Archived</span>' : '<span class="chip ' + (biz ? 'nofa' : 'personal') + '">' + (biz ? 'NOFA' : 'Personal') + '</span>') + '</div>' +
+    (a.archived ? '<span class="chip muted">Archived</span>' : '<span class="chip ' + entityChipClass(a.entity) + '">' + entityLabel(a.entity) + '</span>') + '</div>' +
     '<p class="acct-bal">' + money(a.balance) + '</p>' +
     '<p class="acct-sub">' + (a.archived ? 'Excluded from totals' : 'Available now') + '</p>' +
     '<div class="acct-spark">' + sparkSVG(spark, 280, 40, '#9DBAFF', 'rgba(46,99,231,.22)') + '</div>' +
@@ -1185,20 +1607,31 @@ function accountsView() {
   var active = st.accounts.filter(function (a) { return !a.archived; });
   var biz = active.filter(function (a) { return a.entity === 'business'; }).reduce(function (s, a) { return s + a.balance; }, 0);
   var per = active.filter(function (a) { return a.entity === 'personal'; }).reduce(function (s, a) { return s + a.balance; }, 0);
-  var total = biz + per || 1;
+  var other = active.filter(function (a) { return a.entity === 'other_business'; }).reduce(function (s, a) { return s + a.balance; }, 0);
+  /* Headline total must include EVERY active account regardless of
+     entity -- other_business balances must never be silently dropped. */
+  var total = (biz + per + other) || 1;
+  var hasOther = active.some(function (a) { return a.entity === 'other_business'; });
   var archived = st.accounts.filter(function (a) { return a.archived; }).length;
   var filtered = state.acctFilter === 'all' ? active
     : state.acctFilter === 'archived' ? st.accounts.filter(function (a) { return a.archived; })
     : st.accounts.filter(function (a) { return a.entity === state.acctFilter && !a.archived; });
-  var filters = [['all','All'],['business','NOFA Business'],['personal','Personal'],['archived','Archived' + (archived ? ' (' + archived + ')' : '')]];
+  var filters = [['all','All'],['business','NOFA Business'],['personal','Personal']]
+    .concat(hasOther ? [['other_business','Other Business']] : [])
+    .concat([['archived','Archived' + (archived ? ' (' + archived + ')' : '')]]);
   return pageHeader('Accounts', null, active.length + ' active \u00b7 ' + money(total) + ' available',
       '<button class="btn primary" data-action="modal" data-modal="add-account">' + ic('plus', 15) + 'Add Account</button>') +
     '<div class="card pad mb5"><div class="chead"><div class="chead-l"><span class="tile brand">' + ic('bank', 16) + '</span>' +
-    '<div><p class="chead-t">Cash split</p><p class="chead-s">Business vs personal share</p></div></div>' +
+    '<div><p class="chead-t">Cash split</p><p class="chead-s">Across all active accounts</p></div></div>' +
     '<div style="display:flex;gap:20px;font-size:12px;flex-wrap:wrap">' +
     '<span style="display:inline-flex;align-items:center;gap:6px"><i class="dot" style="background:var(--b500)"></i><b>NOFA ' + money(biz, 0) + '</b><span style="color:#94A3B8">\u00b7 ' + Math.round(biz / total * 100) + '%</span></span>' +
     '<span style="display:inline-flex;align-items:center;gap:6px"><i class="dot" style="background:var(--g500)"></i><b>Personal ' + money(per, 0) + '</b><span style="color:#94A3B8">\u00b7 ' + Math.round(per / total * 100) + '%</span></span>' +
-    '</div></div><div class="splitbar" style="margin-top:16px"><div class="sb b" style="width:' + (biz / total * 100) + '%"></div><div class="sb g" style="flex:1"></div></div></div>' +
+    (hasOther ? '<span style="display:inline-flex;align-items:center;gap:6px"><i class="dot" style="background:#E8A23D"></i><b>Other Business ' + money(other, 0) + '</b><span style="color:#94A3B8">\u00b7 ' + Math.round(other / total * 100) + '%</span></span>' : '') +
+    '</div></div><div class="splitbar" style="margin-top:16px"><div class="sb b" style="width:' + (biz / total * 100) + '%"></div>' +
+    (hasOther
+      ? '<div class="sb g" style="width:' + (per / total * 100) + '%"></div><div class="sb a" style="width:' + (other / total * 100) + '%"></div>'
+      : '<div class="sb g" style="flex:1"></div>') +
+    '</div></div>' +
     '<div class="fchips mb5">' + filters.map(function (f) {
       return '<button class="fchip' + (state.acctFilter === f[0] ? ' on' : '') + '" data-action="acct-filter" data-filter="' + f[0] + '">' + f[1] + '</button>';
     }).join('') + '</div>' +
@@ -1213,14 +1646,14 @@ function accountsView() {
 ================================================================ */
 function txBodyHTML() {
   var f = state.txF, q = state.txQ.toLowerCase();
-  var base = DATA.transactions.filter(function (t) {
-    return (f === 'all' || f === 'business' || f === 'personal') ? t.entity === f : true;
+  var base = state.store.transactions.filter(function (t) {
+    return (f === 'business' || f === 'personal' || f === 'other_business') ? t.entity === f : true;
   });
   var filtered = base.filter(function (t) {
     if (f === 'in' && t.amount <= 0) return false;
     if (f === 'out' && t.amount > 0) return false;
     return t.name.toLowerCase().indexOf(q) !== -1;
-  });
+  }).sort(function (a, b) { return b.date.localeCompare(a.date) || String(b.id).localeCompare(String(a.id)); });
   if (!filtered.length) {
     return '<div class="card empty"><span class="tile slate">' + ic('search', 20) + '</span><p class="et">No transactions match</p><p class="es">Try a different search or filter.</p>' +
       '<button class="btn ghost" style="margin:20px auto 0" data-action="tx-clear">Reset filters</button></div>';
@@ -1233,27 +1666,34 @@ function txBodyHTML() {
   });
   return groups.map(function (g) {
     return '<div class="card mb5"><div style="display:flex;align-items:center;justify-content:space-between;padding:14px 24px;border-bottom:1px solid rgba(231,235,241,.7)">' +
-      '<p style="font-size:12px;font-weight:600;letter-spacing:.08em;text-transform:uppercase;color:#64748B">' + g.date + '</p>' +
+      '<p style="font-size:12px;font-weight:600;letter-spacing:.08em;text-transform:uppercase;color:#64748B">' + fmtShort(g.date) + '</p>' +
       '<p style="font-size:11px;color:#94A3B8">' + g.items.length + ' transaction' + (g.items.length > 1 ? 's' : '') + '</p></div>' +
       '<div style="padding:4px 12px" class="rows">' + g.items.map(function (t) {
-        return '<div class="rowitem"><span class="tile ' + (t.entity === 'business' ? 'brand' : 'grape') + '">' + ic(t.icon, 15) + '</span>' +
-          '<div class="rowmain"><p class="rowt">' + t.name + '</p><p class="rowsub">' + t.cat + '</p></div>' +
-          '<span class="chip ' + (t.entity === 'business' ? 'nofa' : 'personal') + '" style="display:none" data-md="1">' + (t.entity === 'business' ? 'NOFA' : 'Personal') + '</span>' +
-          '<p class="amt ' + (t.amount > 0 ? 'pos' : 'neg') + '" style="width:86px;text-align:right">' + (t.amount > 0 ? '+' : '\u2212') + money(Math.abs(t.amount)) + '</p></div>';
+        return '<div class="rowitem"><span class="tile ' + entityTileClass(t.entity) + '">' + ic(t.icon || (t.amount > 0 ? 'banknote' : 'card'), 15) + '</span>' +
+          '<div class="rowmain"><p class="rowt">' + esc(t.name) + (t.status === 'pending' ? ' <span class="chip amber" style="margin-left:6px">Pending</span>' : '') + '</p><p class="rowsub">' + esc(t.category || '') + '</p></div>' +
+          '<p class="amt ' + (t.amount > 0 ? 'pos' : 'neg') + '" style="width:86px;text-align:right">' + (t.amount > 0 ? '+' : '\u2212') + money(Math.abs(t.amount)) + '</p>' +
+          '<div style="display:flex;gap:5px;flex-shrink:0">' +
+          '<button class="act" data-action="modal" data-modal="edit-transaction" data-id="' + t.id + '" title="Edit transaction">' + ic('pencil', 13) + '</button>' +
+          '<button class="act danger" data-action="delete-transaction" data-id="' + t.id + '" title="Delete transaction">' + ic('trash', 13) + '</button>' +
+          '</div></div>';
       }).join('') + '</div></div>';
   }).join('');
 }
 function transactionsView() {
   var f = state.txF;
-  var base = DATA.transactions.filter(function (t) {
-    return (f === 'all' || f === 'business' || f === 'personal') ? t.entity === f : true;
+  var base = state.store.transactions.filter(function (t) {
+    return (f === 'business' || f === 'personal' || f === 'other_business') ? t.entity === f : true;
   });
   var inS = base.filter(function (t) { return t.amount > 0; }).reduce(function (s, t) { return s + t.amount; }, 0);
   var outS = base.filter(function (t) { return t.amount < 0; }).reduce(function (s, t) { return s + Math.abs(t.amount); }, 0);
   var net = inS - outS;
-  var chips = [['all','All'],['business','NOFA'],['personal','Personal'],['in','Income'],['out','Expenses']];
-  return pageHeader('Transactions', null, 'All seeded activity \u00b7 stored as mock data',
-      '<button class="btn ghost" data-action="export-csv">' + ic('download', 15) + 'Export CSV</button>') +
+  var hasOtherTx = state.store.transactions.some(function (t) { return t.entity === 'other_business'; });
+  var chips = [['all','All'],['business','NOFA'],['personal','Personal']]
+    .concat(hasOtherTx ? [['other_business','Other Business']] : [])
+    .concat([['in','Income'],['out','Expenses']]);
+  return pageHeader('Transactions', null, 'All activity \u00b7 synced with account balances',
+      '<button class="btn ghost" data-action="export-csv">' + ic('download', 15) + 'Export CSV</button>' +
+      '<button class="btn primary" data-action="modal" data-modal="add-transaction">' + ic('plus', 15) + 'Add Transaction</button>') +
     '<div class="stat3">' +
     '<div class="stat"><span class="flabel">Money in</span><p class="sv pos">+' + money(inS) + '</p></div>' +
     '<div class="stat"><span class="flabel">Money out</span><p class="sv neg">\u2212' + money(outS) + '</p></div>' +
@@ -1284,7 +1724,8 @@ function recRow(i, entity) {
     '</div></div>';
 }
 function recGroup(title, entity, icon, items, q) {
-  var shown = items.filter(function (i) { return i.name.toLowerCase().indexOf(q) !== -1 || (i.note || '').toLowerCase().indexOf(q) !== -1; });
+  var shown = items.filter(function (i) { return i.name.toLowerCase().indexOf(q) !== -1 || (i.note || '').toLowerCase().indexOf(q) !== -1; })
+    .slice().sort(function (a, b) { return (parseInt(a.day, 10) || 0) - (parseInt(b.day, 10) || 0); });
   var act = items.filter(function (i) { return !i.status; });
   var total = act.reduce(function (s, i) { return s + i.amount; }, 0);
   return '<div class="card pad hfull"><div class="rghead"><div class="chead-l"><span class="tile ' + (entity === 'business' ? 'brand' : 'grape') + '">' + ic(icon, 16) + '</span>' +
@@ -1339,25 +1780,38 @@ function recurringView() {
    INCOME VIEW
 ================================================================ */
 function incomeCardView(s) {
-  return '<div class="card pad fcol' + (s.status === 'planned' ? ' planned' : '') + '">' +
-    '<div class="is-top"><span class="tile ' + (s.status === 'active' ? 'leaf' : 'slate') + '">' + ic('banknote', 17) + '</span>' +
-    (s.status === 'active' ? '<span class="chip leaf">Active</span>' : '<span class="chip muted">Coming soon</span>') + '</div>' +
+  var statusChip = s.cashStatus === 'confirmed' ? '<span class="chip leaf">Confirmed</span>' :
+    s.cashStatus === 'expected' ? '<span class="chip amber">Expected</span>' : '<span class="chip muted">Pipeline</span>';
+  return '<div class="card pad fcol' + (s.cashStatus === 'pipeline' ? ' planned' : '') + '">' +
+    '<div class="is-top"><span class="tile ' + (s.cashStatus === 'pipeline' ? 'slate' : 'leaf') + '">' + ic('banknote', 17) + '</span>' + statusChip + '</div>' +
     '<p class="is-name">' + esc(s.name) + '</p><p class="is-amt mono">' + esc(s.display) + '</p>' +
     '<p class="is-cad">' + esc(s.cadence) + '</p>' +
-    '<p class="is-note">' + ic('info', 14) + esc(s.note) + '</p></div>';
+    '<p class="is-note">' + ic('info', 14) + esc(s.note) + '</p>' +
+    '<div style="display:flex;gap:6px;margin-top:16px">' +
+    '<button class="act" data-action="modal" data-modal="edit-income" data-id="' + s.id + '" title="Edit income source">' + ic('pencil', 13) + 'Edit</button>' +
+    '<button class="act danger" data-action="delete-income" data-id="' + s.id + '" title="Delete income source">' + ic('trash', 13) + '</button>' +
+    '</div></div>';
 }
 function incomeView() {
-  return pageHeader('Income', null, 'Projected streams and their true margin',
+  var confirmed = state.store.incomeSources.filter(function (s) { return s.cashStatus === 'confirmed'; });
+  var confirmedMonthly = confirmed.reduce(function (sum, s) { return sum + (s.amount || 0) * cadenceMonthlyFactor(s.cadenceDays); }, 0);
+  var projectedBase = monthlyIncomeBaseline();
+  var nextUp = state.store.incomeSources.filter(function (s) { return s.cashStatus !== 'pipeline' && s.nextDate; }).sort(function (a, b) { return a.nextDate.localeCompare(b.nextDate); })[0];
+  return pageHeader('Income', null, 'Projected streams and their true cash status',
       '<button class="btn primary" data-action="modal" data-modal="add-income">' + ic('plus', 15) + 'Add Income Source</button>') +
     '<div class="stat3">' +
-    '<div class="stat" style="display:flex;align-items:center;gap:16px"><span class="tile leaf">' + ic('banknote', 17) + '</span><div class="minw0"><span class="flabel" style="margin-bottom:2px">Confirmed monthly</span><p class="sv">$295.00</p><p class="chead-s">Bon App\u00e9tit \u00b7 gross</p></div></div>' +
-    '<div class="stat" style="display:flex;align-items:center;gap:16px"><span class="tile brand">' + ic('trend', 17) + '</span><div class="minw0"><span class="flabel" style="margin-bottom:2px">Projected base</span><p class="sv">~$1,095</p><p class="chead-s">With biweekly average</p></div></div>' +
-    '<div class="stat" style="display:flex;align-items:center;gap:16px"><span class="tile grape">' + ic('clock', 17) + '</span><div class="minw0"><span class="flabel" style="margin-bottom:2px">Next expected</span><p class="sv">Sep 19</p><p class="chead-s">Other Business \u00b7 ~$800</p></div></div>' +
+    '<div class="stat" style="display:flex;align-items:center;gap:16px"><span class="tile leaf">' + ic('banknote', 17) + '</span><div class="minw0"><span class="flabel" style="margin-bottom:2px">Confirmed monthly</span><p class="sv">' + money(confirmedMonthly, 0) + '</p><p class="chead-s">' + confirmed.length + ' confirmed source' + (confirmed.length === 1 ? '' : 's') + '</p></div></div>' +
+    '<div class="stat" style="display:flex;align-items:center;gap:16px"><span class="tile brand">' + ic('trend', 17) + '</span><div class="minw0"><span class="flabel" style="margin-bottom:2px">Projected base</span><p class="sv">' +
+    (Math.abs(projectedBase.high - projectedBase.low) >= 0.005
+      ? money(projectedBase.low, 0) + ' \u2013 ' + money(projectedBase.high, 0)
+      : '~' + money(projectedBase.mid, 0)) +
+    '</p><p class="chead-s">Confirmed + expected recurring</p></div></div>' +
+    '<div class="stat" style="display:flex;align-items:center;gap:16px"><span class="tile grape">' + ic('clock', 17) + '</span><div class="minw0"><span class="flabel" style="margin-bottom:2px">Next expected</span><p class="sv">' + (nextUp ? fmtShort(nextUp.nextDate) : '\u2014') + '</p><p class="chead-s">' + (nextUp ? esc(nextUp.name) + ' \u00b7 ' + esc(nextUp.display) : 'None scheduled') + '</p></div></div>' +
     '</div>' +
     '<div class="grid3">' + state.store.incomeSources.map(incomeCardView).join('') +
     '<div class="c12" style="grid-column:1/-1"><div class="card pad" style="background:linear-gradient(135deg,#FBF9FF,#F4F8FE)">' +
     '<div style="display:flex;align-items:flex-start;gap:12px"><span class="tile grape">' + ic('sparkle', 16) + '</span>' +
-    '<p style="font-size:12.5px;color:#475569;line-height:1.65"><b style="color:var(--ink)">Margin note:</b> Bon App\u00e9tit monthly income starts at <b style="color:var(--ink)">$295 / month</b>, but part of it is offset by Judy / API service costs \u2014 treat the usable margin as materially lower than gross. Variable project income (Other Business) remains the primary flexible inflow.</p></div></div></div>' +
+    '<p style="font-size:12.5px;color:#475569;line-height:1.65"><b style="color:var(--ink)">Cash-status note:</b> Only <b style="color:var(--ink)">Confirmed</b> sources count toward the deterministic Known Forecast. <b style="color:var(--ink)">Expected</b> recurring income is shown for planning but is not guaranteed. <b style="color:var(--ink)">Pipeline</b> opportunities are never counted as spendable cash.</p></div></div></div>' +
     '</div>';
 }
 
@@ -1366,46 +1820,50 @@ function incomeView() {
 ================================================================ */
 function forecastView() {
   var st = state.store;
-  var start = st.accounts.filter(function (a) { return !a.archived; }).reduce(function (s, a) { return s + a.balance; }, 0);
   var h = state.horizon;
-  var evs = DATA.forecastEvents.filter(function (e) { return e.d >= 1 && e.d <= h; });
-  var inH = evs.filter(function (e) { return e.amount > 0; }).reduce(function (s, e) { return s + e.amount; }, 0);
-  var outH = evs.filter(function (e) { return e.amount < 0; }).reduce(function (s, e) { return s + Math.abs(e.amount); }, 0);
-  var net = inH - outH, end = start + net;
+  var f = computeKnownForecast(h);
+  var evs = f.events.filter(function (e) { return e.d >= 1 && e.d <= h; });
   var reserve = st.goals[0];
-  return pageHeader('Forecast', null, 'Projected cash position \u00b7 Sep 12 onward',
+  var reservePct = Math.round(Math.min(reserve.current / Math.max(reserve.target, 1), 1) * 100);
+  var planned = st.ownerTransfers.filter(function (t) { return t.status === 'planned'; }).sort(function (a, b) { return a.date.localeCompare(b.date); });
+  var nextPlanned = planned[0];
+  return pageHeader('Forecast', null, 'Projected cash position \u00b7 ' + fmtShort(todayISO()) + ' onward',
       '<div class="seg">' + [7, 15, 30].map(function (x) {
         return '<button class="' + (h === x ? 'on' : '') + '" data-action="horizon" data-h="' + x + '">' + x + ' days</button>';
       }).join('') + '</div>') +
     '<div class="kpis mb5">' +
-    kpi({ tint:'leaf', icon:'trend', label:'Projected inflow', val:money(inH), sub:evs.filter(function (e) { return e.amount > 0; }).length + ' income events' }) +
-    kpi({ tint:'coral', icon:'swap', label:'Projected outflow', val:money(outH), sub:evs.filter(function (e) { return e.amount < 0; }).length + ' obligations' }) +
-    kpi({ tint:'brand', icon:'chart', label:'Net over period', val:(net >= 0 ? '+' : '\u2212') + money(Math.abs(net)), sub:net >= 0 ? 'Cash holding steady' : 'Planned drawdown' }) +
-    kpi({ tint:'grape', icon:'wallet', label:'Balance \u00b7 ' + dlabel(h), val:money(end, 0), sub:'From current position' }) +
+    kpi({ tint:'leaf', icon:'trend', label:'Projected inflow', val:money(f.inflow), sub:evs.filter(function (e) { return e.amount > 0; }).length + ' income events' }) +
+    kpi({ tint:'coral', icon:'swap', label:'Projected outflow', val:money(f.outflow), sub:evs.filter(function (e) { return e.amount < 0; }).length + ' obligations' }) +
+    kpi({ tint:'brand', icon:'chart', label:'Net over period', val:(f.net >= 0 ? '+' : '\u2212') + money(Math.abs(f.net)), sub:f.net >= 0 ? 'Cash holding steady' : 'Planned drawdown' }) +
+    kpi({ tint:'grape', icon:'wallet', label:'Balance \u00b7 ' + dlabel(h), val:money(f.end, 0), sub:'From current position' }) +
     '</div>' +
     '<div class="card pad mb5">' + cardHead('calendar', 'brand', 'Projected cash position', 'Hover the line to inspect any day') +
-    forecastChartHTML(h, start) + '</div>' +
+    forecastChartHTML(h) + '</div>' +
     '<div class="row12">' +
     '<div class="c7"><div class="card pad">' + cardHead('clock', 'slate', 'Event timeline', evs.length + ' events in the next ' + h + ' days') +
-    '<div class="rows">' + evs.map(function (e) {
+    '<div class="rows">' + (evs.length ? evs.map(function (e) {
       return '<div class="rowitem"><span class="datechip">' + dlabel(e.d) + '</span>' +
-        '<div class="rowmain"><p class="rowt">' + e.label + '</p></div>' +
+        '<div class="rowmain"><p class="rowt">' + esc(e.label) + '</p></div>' +
         '<span class="chip ' + (e.entity === 'business' ? 'nofa' : e.entity === 'personal' ? 'personal' : 'muted') + '">' + (e.entity === 'business' ? 'NOFA' : e.entity === 'personal' ? 'Personal' : 'Mixed') + '</span>' +
-        '<p class="amt ' + (e.amount > 0 ? 'pos' : 'neg') + '" style="width:86px;text-align:right">' + (e.amount > 0 ? '+' : '\u2212') + money(Math.abs(e.amount)) + '</p></div>';
-    }).join('') + '</div></div></div>' +
+        '<p class="amt ' + (e.amount > 0 ? 'pos' : e.amount < 0 ? 'neg' : '') + '" style="width:86px;text-align:right">' + (e.kind === 'owner-transfer' ? money(e.transferAmount) : (e.amount > 0 ? '+' : '\u2212') + money(Math.abs(e.amount))) + '</p></div>';
+    }).join('') : '<p class="nomatch">No scheduled events in this window.</p>') + '</div></div></div>' +
     '<div class="c5 vstack">' +
-    '<div class="card pad">' + cardHead('bank', 'brand', 'Owner Withdrawal Planning', 'Monthly draw policy') +
-    '<p class="mono" style="margin-top:16px;font-size:30px;font-weight:600;line-height:1">$0</p>' +
-    '<p style="font-size:12px;color:#64748B;margin-top:6px">Recommended draw this cycle</p>' +
-    '<p style="margin-top:16px;font-size:13px;color:#475569;line-height:1.65">Hold withdrawals until the <b style="color:var(--ink)">NOFA Operating Reserve</b> reaches its $4,000 target \u2014 currently <b style="color:var(--ink)">' + Math.round(reserve.current / reserve.target * 100) + '% funded</b>. Planned draw: <b style="color:var(--ink)">$300 / month</b> once funded.</p>' +
-    '<div class="hbar" style="margin-top:16px"><i style="width:' + (reserve.current / reserve.target * 100) + '%"></i></div>' +
-    '<div style="display:flex;justify-content:space-between;margin-top:8px;font-size:11px;font-family:var(--mono);color:#94A3B8"><span>$3,480</span><span>$4,000</span></div></div>' +
+    '<div class="card pad">' + cardHead('bank', 'brand', 'Owner Withdrawal Planning', 'Tracked separately from operating expenses') +
+    '<p class="mono" style="margin-top:16px;font-size:30px;font-weight:600;line-height:1">' + (nextPlanned ? money(nextPlanned.amount) : '$0') + '</p>' +
+    '<p style="font-size:12px;color:#64748B;margin-top:6px">' + (nextPlanned ? 'Planned for ' + fmtShort(nextPlanned.date) : 'No withdrawal currently planned') + '</p>' +
+    '<p style="margin-top:16px;font-size:13px;color:#475569;line-height:1.65">NOFA Operating Reserve is currently <b style="color:var(--ink)">' + reservePct + '% funded</b> (' + money(reserve.current, 0) + ' of ' + money(reserve.target, 0) + ').</p>' +
+    '<div class="hbar" style="margin-top:16px"><i style="width:' + reservePct + '%"></i></div>' +
+    '<div style="display:flex;justify-content:space-between;margin-top:8px;font-size:11px;font-family:var(--mono);color:#94A3B8"><span>' + money(reserve.current, 0) + '</span><span>' + money(reserve.target, 0) + '</span></div>' +
+    (planned.length ? '<div class="spendlist" style="margin-top:16px">' + planned.map(function (t) {
+      return '<div><span>' + esc(t.note || (t.direction === 'nofa_to_personal' ? 'NOFA \u2192 Personal' : 'Personal \u2192 NOFA')) + ' \u00b7 ' + fmtShort(t.date) + '</span><span style="display:flex;align-items:center;gap:8px"><span class="mono">' + money(t.amount) + '</span><button class="act" data-action="complete-owner-transfer" data-id="' + t.id + '" title="Mark completed">' + ic('check', 12) + '</button><button class="act danger" data-action="delete-owner-transfer" data-id="' + t.id + '" title="Delete">' + ic('trash', 12) + '</button></span></div>';
+    }).join('') + '</div>' : '') +
+    '<button class="btn ghost wide" style="margin-top:16px" data-action="modal" data-modal="add-owner-transfer">' + ic('plus', 14) + 'Add Owner Transfer</button></div>' +
     '<div class="card pad">' + cardHead('info', 'grape', 'Planning assumptions') +
     '<ul class="assump">' + [
-      'Bon App\u00e9tit monthly income starts at $295 / month (gross).',
-      'Part of that income is offset by Judy / API service costs.',
-      'Personal cash flow is tighter \u2014 watch the Sep 12\u201325 window.',
-      'AI build budget stays capped at $400 / month.',
+      'Only confirmed income counts toward the Known Forecast \u2014 expected and pipeline income are excluded.',
+      'Recurring expense due-days roll forward automatically as real time passes.',
+      'Owner transfers move cash between NOFA and Personal; they net to $0 on the combined balance shown here.',
+      'AI build spend is tracked separately from fixed recurring subscriptions.',
       'This is a monitoring & planning tool \u2014 not accounting compliance.'
     ].map(function (t) { return '<li>' + ic('check', 13) + t + '</li>'; }).join('') + '</ul></div>' +
     '</div></div>';
@@ -1443,23 +1901,27 @@ function goalsView() {
    REPORTS VIEW
 ================================================================ */
 function reportsView() {
-  var bizT = DATA.recurringBusiness.filter(function (r) { return !r.status; }).reduce(function (s, r) { return s + r.amount; }, 0);
-  var perT = DATA.recurringPersonal.filter(function (r) { return !r.status; }).reduce(function (s, r) { return s + r.amount; }, 0);
-  var grand = bizT + perT;
-  return pageHeader('Reports', null, 'Visual summaries of the prototype\u2019s seed data',
+  var bizT = recurringList('business').filter(function (r) { return !r.status; }).reduce(function (s, r) { return s + r.amount; }, 0);
+  var perT = recurringList('personal').filter(function (r) { return !r.status; }).reduce(function (s, r) { return s + r.amount; }, 0);
+  var grand = (bizT + perT) || 1;
+  var snaps = state.store.balanceSnapshots;
+  var netTrend = entityTrend('total');
+  return pageHeader('Reports', null, 'Visual summaries derived from your live data',
       '<button class="btn ghost" data-action="export-csv">' + ic('download', 15) + 'Export CSV</button>' +
       '<button class="btn ghost" data-action="export-json">' + ic('download', 15) + 'Export JSON</button>') +
     '<div class="row12">' +
     '<div class="c8"><div class="card pad">' + cardHead('chart', 'brand', 'Monthly Cash Flow', 'Income vs expenses \u00b7 hover for detail') +
-    '<div style="margin-top:24px">' + barChartHTML(DATA.cashflow, 215, true) + '</div></div></div>' +
-    '<div class="c4"><div class="card pad">' + cardHead('trend', 'leaf', 'Net position trend', 'Last 5 weeks') +
-    '<div style="margin-top:24px;height:104px">' + sparkSVG([6680, 6890, 7010, 7180, 7448], 320, 104, '#2E63E7', 'rgba(46,99,231,.22)') + '</div>' +
-    '<div style="margin-top:20px;display:flex;flex-direction:column;gap:10px;font-size:12.5px">' +
-    '<div style="display:flex;justify-content:space-between"><span style="color:#64748B">Since Aug</span><span class="chip leaf">+11.5%</span></div>' +
-    '<div style="display:flex;justify-content:space-between"><span style="color:#64748B">Current position</span><b class="mono">$7,448</b></div>' +
-    '<div style="display:flex;justify-content:space-between"><span style="color:#64748B">Weekly average</span><b class="mono" style="color:var(--l600)">+$153</b></div></div></div></div>' +
-    '<div class="c4"><div class="card pad">' + cardHead('briefcase', 'brand', 'NOFA expense mix', 'Monthly recurring \u00b7 $600.84') + donutHTML(DATA.reportMix.nofa, 168, 21, 'per month') + '</div></div>' +
-    '<div class="c4"><div class="card pad">' + cardHead('user', 'grape', 'Personal expense mix', 'Monthly recurring \u00b7 $2,048.49') + donutHTML(DATA.reportMix.personal, 168, 21, 'per month') + '</div></div>' +
+    '<div style="margin-top:24px">' + barChartHTML(computeMonthlyCashflow(4), 215, true) + '</div></div></div>' +
+    '<div class="c4"><div class="card pad">' + cardHead('trend', 'leaf', 'Net position trend', snaps.length >= 2 ? 'Since tracking began' : 'Builds up as you use the app') +
+    (snaps.length >= 2 ?
+      '<div style="margin-top:24px;height:104px">' + sparkSVG(snaps.map(function (s) { return s.total; }).slice(-10), 320, 104, '#2E63E7', 'rgba(46,99,231,.22)') + '</div>' +
+      '<div style="margin-top:20px;display:flex;flex-direction:column;gap:10px;font-size:12.5px">' +
+      '<div style="display:flex;justify-content:space-between"><span style="color:#64748B">Since tracking began</span><span class="chip ' + (netTrend.up ? 'leaf' : 'coral') + '">' + (netTrend.up ? '+' : '\u2212') + Math.abs(netTrend.pct).toFixed(1) + '%</span></div>' +
+      '<div style="display:flex;justify-content:space-between"><span style="color:#64748B">Current position</span><b class="mono">' + money(snaps[snaps.length - 1].total, 0) + '</b></div>' +
+      '<div style="display:flex;justify-content:space-between"><span style="color:#64748B">Snapshots recorded</span><b class="mono">' + snaps.length + '</b></div></div>'
+      : '<p style="margin-top:24px;font-size:12.5px;color:#64748B;line-height:1.6">Daily balance snapshots start accumulating from today \u2014 come back after a few days to see a real trend line here.</p>') + '</div></div>' +
+    '<div class="c4"><div class="card pad">' + cardHead('briefcase', 'brand', 'NOFA expense mix', 'Monthly recurring \u00b7 ' + money(bizT)) + donutHTML(computeCategoryMix('business'), 168, 21, 'per month') + '</div></div>' +
+    '<div class="c4"><div class="card pad">' + cardHead('user', 'grape', 'Personal expense mix', 'Monthly recurring \u00b7 ' + money(perT)) + donutHTML(computeCategoryMix('personal'), 168, 21, 'per month') + '</div></div>' +
     '<div class="c4"><div class="card pad">' + cardHead('repeat', 'coral', 'Recurring load', 'Monthly baseline by entity') +
     '<div class="splitbar" style="height:14px;margin-top:28px"><div class="sb b" style="width:' + (bizT / grand * 100) + '%"></div><div class="sb g" style="flex:1"></div></div>' +
     '<div style="margin-top:20px;display:flex;flex-direction:column;gap:12px">' +
@@ -1575,7 +2037,7 @@ function closeModal() {
   if (!state.sidebarOpen) document.body.style.overflow = '';
 }
 function modalShell(title, sub, body) {
-  return '<div class="modal-backdrop" data-action="close-modal"><div class="modal" data-stop="1">' +
+  return '<div class="modal-backdrop" data-action="close-modal" data-backdrop="1"><div class="modal" data-stop="1">' +
     '<div class="minner"><div class="mhead"><div><h3>' + title + '</h3>' + (sub ? '<p class="msub">' + sub + '</p>' : '') + '</div>' +
     '<button class="mclose" data-action="close-modal" aria-label="Close">' + ic('x', 16) + '</button></div>' +
     '<div class="mbody">' + body + '</div></div></div></div>';
@@ -1611,23 +2073,32 @@ function renderModal() {
         : '<button class="act danger" data-action="delete-account" data-id="' + (a.id || '') + '">' + ic('trash', 13) + 'Delete\u2026</button>') +
       '</div>');
   } else if (m.type === 'add-income') {
-    html = modalShell('Add Income Source', 'Tracked locally \u2014 great for planning drafts.',
+    html = modalShell('Add Income Source', 'Classify cash status so forecasts stay accurate.',
       '<form class="mform" data-form="add-income">' +
       '<label><span class="flabel">Source name</span><input class="field" name="name" autofocus placeholder="e.g. Retainer \u2014 Acme Co"></label>' +
       '<div class="formrow formrow2">' +
-      '<label><span class="flabel">Amount / range</span><input class="field" name="display" placeholder="$295.00 or $750 \u2013 $850"></label>' +
+      '<label><span class="flabel">Display text</span><input class="field" name="display" placeholder="$295.00 or $750 \u2013 $850"></label>' +
+      '<label><span class="flabel">Forecast amount</span><div class="moneyfield"><span>$</span><input class="field" name="amount" inputmode="decimal" placeholder="0.00"></div></label></div>' +
+      '<div class="formrow formrow2">' +
       '<label><span class="flabel">Cadence</span><select class="field" name="cadence">' +
-      ['Monthly','Biweekly','Weekly','One-off','Variable'].map(function (c) { return '<option>' + c + '</option>'; }).join('') + '</select></label></div>' +
+      ['Monthly','Biweekly','Weekly','One-off','Variable'].map(function (c) { return '<option>' + c + '</option>'; }).join('') + '</select></label>' +
+      '<label><span class="flabel">Cash status</span><select class="field" name="cashStatus">' +
+      '<option value="confirmed">Confirmed</option><option value="expected" selected>Expected</option><option value="pipeline">Pipeline</option></select></label></div>' +
+      '<label><span class="flabel">Next expected date</span><input class="field" type="date" name="nextDate"></label>' +
+      '<div><span class="flabel">Entity</span><div class="seg2">' +
+      '<button type="button" class="on" data-action="seg" data-v="business">' + ic('briefcase', 15) + 'NOFA Business</button>' +
+      '<button type="button" data-action="seg" data-v="personal">' + ic('user', 15) + 'Personal</button></div>' +
+      '<input type="hidden" name="entity" value="business"></div>' +
       '<label><span class="flabel">Note</span><input class="field" name="note" placeholder="e.g. Gross \u2014 deduct service costs"></label>' +
       '<div class="mactions"><button type="button" class="btn ghost" data-action="close-modal">Cancel</button>' +
       '<button class="btn primary">' + ic('plus', 15) + 'Add Source</button></div></form>');
   } else if (m.type === 'add-expense') {
     html = modalShell('Add Recurring Expense', 'Add a monthly business or personal obligation.',
       '<form class="mform" data-form="add-expense">' +
-      '<input type="hidden" name="entity" value="business">' +
       '<div><span class="flabel">Account</span><div class="seg2">' +
       '<button type="button" class="on" data-action="seg" data-v="business">' + ic('briefcase',14) + 'NOFA Business</button>' +
-      '<button type="button" data-action="seg" data-v="personal">' + ic('user',14) + 'Personal</button></div></div>' +
+      '<button type="button" data-action="seg" data-v="personal">' + ic('user',14) + 'Personal</button></div>' +
+      '<input type="hidden" name="entity" value="business"></div>' +
       '<div class="formrow formrow2">' +
       '<label><span class="flabel">Due day</span><input class="field" name="day" inputmode="numeric" maxlength="2" placeholder="e.g. 20" required></label>' +
       '<label><span class="flabel">Monthly amount</span><div class="moneyfield"><span>$</span><input class="field" name="amount" inputmode="decimal" placeholder="0.00" required></div></label></div>' +
@@ -1654,11 +2125,19 @@ function renderModal() {
   } else if (m.type === 'edit-goal') {
     var g = findGoal(m.id) || {};
     var spend = g.mode === 'spend';
+    /* NOFA Protected Reserve's "saved" amount is derived (see
+       syncReserveGoal()), not manually entered -- only its target stays
+       editable, matching the AI Build Budget spend-goal pattern below. */
+    var isReserve = isNofaReserveGoal(g);
     html = modalShell('Edit Goal', esc(g.name || ''),
       '<form class="mform" data-form="edit-goal" data-id="' + (g.id || '') + '">' +
       '<div class="formrow formrow2">' +
-      '<label><span class="flabel">' + (spend ? 'Used so far' : 'Saved so far') + '</span><div class="moneyfield"><span>$</span><input class="field" name="current" inputmode="decimal" autofocus value="' + (g.current != null ? g.current : 0) + '"></div></label>' +
-      '<label><span class="flabel">' + (spend ? 'Monthly cap' : 'Target') + '</span><div class="moneyfield"><span>$</span><input class="field" name="target" inputmode="decimal" value="' + (g.target != null ? g.target : 1000) + '"></div></label></div>' +
+      ((spend || isReserve)
+        ? '<label><span class="flabel">' + (spend ? 'Used so far' : 'Saved so far') + '</span><div class="moneyfield"><span>$</span><input class="field" inputmode="decimal" value="' + (g.current != null ? g.current.toFixed(2) : '0.00') + '" disabled></div></label>'
+        : '<label><span class="flabel">Saved so far</span><div class="moneyfield"><span>$</span><input class="field" name="current" inputmode="decimal" autofocus value="' + (g.current != null ? g.current : 0) + '"></div></label>') +
+      '<label><span class="flabel">' + (spend ? 'Monthly cap' : 'Target') + '</span><div class="moneyfield"><span>$</span><input class="field" name="target" inputmode="decimal"' + ((spend || isReserve) ? ' autofocus' : '') + ' value="' + (g.target != null ? g.target : 1000) + '"></div></label></div>' +
+      (spend ? '<p style="font-size:12px;color:#64748B">Amount used is tracked automatically from Build Spend entries.</p>' : '') +
+      (isReserve ? '<p style="font-size:12px;color:#64748B">Automatically calculated as current NOFA cash minus any unexecuted planned owner withdrawals.</p>' : '') +
       (g.note ? '<p style="font-size:12px;color:#64748B">' + esc(g.note) + '</p>' : '') +
       '<div class="mactions"><button type="button" class="btn ghost" data-action="close-modal">Cancel</button>' +
       '<button class="btn primary">' + ic('check', 15) + 'Save goal</button></div></form>');
@@ -1672,6 +2151,103 @@ function renderModal() {
       '<label><span class="flabel">Note</span><input class="field" name="note" placeholder="What is it for?"></label>' +
       '<div class="mactions"><button type="button" class="btn ghost" data-action="close-modal">Cancel</button>' +
       '<button class="btn primary">' + ic('plus', 15) + 'Add Goal</button></div></form>');
+  } else if (m.type === 'edit-income') {
+    var inc = state.store.incomeSources.filter(function (x) { return x.id === m.id; })[0] || {};
+    /* Ranged sources (e.g. "$750 \u2013 $850") must keep editing their low/high
+       ends -- the single "Forecast amount" field below has no way to
+       represent a range and previously always overwrote amountLow/amountHigh
+       with whatever it showed (0, since a ranged source has no .amount),
+       silently collapsing the source to a fixed $0 on the next save. Show
+       Low/High fields whenever the source has a range at all, so re-saving
+       also self-heals any source previously corrupted this way. */
+    var incIsRanged = inc.amountLow != null && inc.amountHigh != null;
+    html = modalShell('Edit Income Source', esc(inc.name || ''),
+      '<form class="mform" data-form="edit-income" data-id="' + esc(inc.id || '') + '">' +
+      '<label><span class="flabel">Source name</span><input class="field" name="name" autofocus value="' + esc(inc.name || '') + '"></label>' +
+      '<div class="formrow formrow2">' +
+      '<label><span class="flabel">Display text</span><input class="field" name="display" value="' + esc(inc.display || '') + '"></label>' +
+      (incIsRanged
+        ? '<div><span class="flabel">Forecast range</span><div class="formrow formrow2" style="gap:8px">' +
+          '<div class="moneyfield"><span>$</span><input class="field" name="amountLow" inputmode="decimal" placeholder="Low" value="' + (inc.amountLow != null ? inc.amountLow : 0) + '"></div>' +
+          '<div class="moneyfield"><span>$</span><input class="field" name="amountHigh" inputmode="decimal" placeholder="High" value="' + (inc.amountHigh != null ? inc.amountHigh : 0) + '"></div>' +
+          '</div></div>'
+        : '<label><span class="flabel">Forecast amount</span><div class="moneyfield"><span>$</span><input class="field" name="amount" inputmode="decimal" value="' + (inc.amount != null ? inc.amount : 0) + '"></div></label>') +
+      '</div>' +
+      '<div class="formrow formrow2">' +
+      '<label><span class="flabel">Cadence</span><select class="field" name="cadence">' +
+      ['Monthly','Biweekly','Weekly','One-off','Variable'].map(function (c) { return '<option' + (inc.cadence === c ? ' selected' : '') + '>' + c + '</option>'; }).join('') + '</select></label>' +
+      '<label><span class="flabel">Cash status</span><select class="field" name="cashStatus">' +
+      ['confirmed','expected','pipeline'].map(function (c) { return '<option value="' + c + '"' + (inc.cashStatus === c ? ' selected' : '') + '>' + c.charAt(0).toUpperCase() + c.slice(1) + '</option>'; }).join('') + '</select></label></div>' +
+      '<label><span class="flabel">Next expected date</span><input class="field" type="date" name="nextDate" value="' + esc(inc.nextDate || '') + '"></label>' +
+      '<label><span class="flabel">Note</span><input class="field" name="note" value="' + esc(inc.note || '') + '"></label>' +
+      '<div class="mactions"><button type="button" class="btn ghost" data-action="close-modal">Cancel</button>' +
+      '<button class="btn primary">' + ic('check', 15) + 'Save Source</button></div></form>');
+  } else if (m.type === 'add-transaction' || m.type === 'edit-transaction') {
+    var editing = m.type === 'edit-transaction';
+    var tx = editing ? (state.store.transactions.filter(function (x) { return x.id === m.id; })[0] || {}) : {};
+    var accts = state.store.accounts.filter(function (a) { return !a.archived || a.id === tx.accountId; });
+    var isExpense = editing ? tx.amount < 0 : true;
+    /* Already-included = user declares this transaction is already
+       reflected in the account balance (e.g. a bank screenshot) and
+       must never be auto-applied. Defaults to unchecked for new
+       transactions (posted ones auto-apply) and reflects the current
+       state for an existing one. */
+    var alreadyIncluded = editing ? !!(tx.includedInBalance && !tx.balanceApplied) : false;
+    html = modalShell(editing ? 'Edit Transaction' : 'Add Transaction', editing ? esc(tx.name || '') : 'Posted transactions automatically update the account balance below, unless marked as already reflected.',
+      '<form class="mform" data-form="' + m.type + '"' + (editing ? ' data-id="' + esc(tx.id || '') + '"' : '') + '>' +
+      '<label><span class="flabel">Account</span><select class="field" name="accountId">' +
+      accts.map(function (a) { return '<option value="' + a.id + '"' + (a.id === tx.accountId ? ' selected' : '') + '>' + esc(a.name) + '</option>'; }).join('') + '</select></label>' +
+      '<div><span class="flabel">Type</span><div class="seg2">' +
+      '<button type="button" class="' + (isExpense ? 'on' : '') + '" data-action="seg" data-v="expense">' + ic('swap', 14) + 'Expense</button>' +
+      '<button type="button" class="' + (!isExpense ? 'on' : '') + '" data-action="seg" data-v="income">' + ic('trend', 14) + 'Income</button></div>' +
+      '<input type="hidden" name="txtype" value="' + (isExpense ? 'expense' : 'income') + '"></div>' +
+      '<div class="formrow formrow2">' +
+      '<label><span class="flabel">Date</span><input class="field" type="date" name="date" value="' + esc(tx.date || todayISO()) + '" required></label>' +
+      '<label><span class="flabel">Amount</span><div class="moneyfield"><span>$</span><input class="field" name="amount" inputmode="decimal" placeholder="0.00" value="' + (editing ? Math.abs(tx.amount || 0) : '') + '" required></div></label></div>' +
+      '<label><span class="flabel">Merchant / description</span><input class="field" name="name" autofocus value="' + esc(tx.name || '') + '" placeholder="e.g. Vercel" required></label>' +
+      '<div class="formrow formrow2">' +
+      '<label><span class="flabel">Status</span><select class="field" name="status">' +
+      '<option value="posted"' + (tx.status !== 'pending' ? ' selected' : '') + '>Posted</option>' +
+      '<option value="pending"' + (tx.status === 'pending' ? ' selected' : '') + '>Pending</option></select></label>' +
+      '<label><span class="flabel">Category</span><input class="field" name="category" value="' + esc(tx.category || '') + '" placeholder="e.g. Software"></label></div>' +
+      '<div class="formrow formrow2">' +
+      '<label><span class="flabel">Client / project</span><input class="field" name="clientProject" value="' + esc(tx.clientProject || '') + '" placeholder="Optional"></label>' +
+      '<label><span class="flabel">Notes</span><input class="field" name="notes" value="' + esc(tx.notes || '') + '" placeholder="Optional"></label></div>' +
+      '<div><span class="flabel">Already reflected in the account balance?</span><div class="seg2">' +
+      '<button type="button" class="' + (alreadyIncluded ? '' : 'on') + '" data-action="seg" data-v="0">' + ic('plus', 14) + 'No \u2014 apply now</button>' +
+      '<button type="button" class="' + (alreadyIncluded ? 'on' : '') + '" data-action="seg" data-v="1">' + ic('check', 14) + 'Yes \u2014 already counted</button></div>' +
+      '<input type="hidden" name="alreadyIncluded" value="' + (alreadyIncluded ? '1' : '0') + '"></div>' +
+      '<p style="font-size:11.5px;color:#64748B;margin-top:-8px">Choose \u201cYes\u201d only if this is already reflected in the account balance above (e.g. imported from a bank screenshot). Otherwise posted transactions automatically update the balance.</p>' +
+      '<div class="mactions"><button type="button" class="btn ghost" data-action="close-modal">Cancel</button>' +
+      '<button class="btn primary">' + ic(editing ? 'check' : 'plus', 15) + (editing ? 'Save Transaction' : 'Add Transaction') + '</button></div></form>');
+  } else if (m.type === 'add-owner-transfer') {
+    var transferAccts = state.store.accounts.filter(function (a) { return !a.archived && (a.entity === 'business' || a.entity === 'personal'); });
+    var bizAcct = transferAccts.filter(function (a) { return a.entity === 'business'; })[0];
+    var perAcct = transferAccts.filter(function (a) { return a.entity === 'personal'; })[0];
+    html = modalShell('Add Owner Transfer', 'Moves cash between a true NOFA business account and a personal account (never Other Business) \u2014 tracked separately from revenue, expenses, and owner withdrawals.',
+      '<form class="mform" data-form="add-owner-transfer">' +
+      '<div class="formrow formrow2">' +
+      '<label><span class="flabel">From account</span><select class="field" name="fromAccountId">' +
+      transferAccts.map(function (a) { return '<option value="' + a.id + '"' + (a.id === (bizAcct && bizAcct.id) ? ' selected' : '') + '>' + esc(a.name) + ' (' + (a.entity === 'business' ? 'NOFA' : 'Personal') + ')</option>'; }).join('') + '</select></label>' +
+      '<label><span class="flabel">To account</span><select class="field" name="toAccountId">' +
+      transferAccts.map(function (a) { return '<option value="' + a.id + '"' + (a.id === (perAcct && perAcct.id) ? ' selected' : '') + '>' + esc(a.name) + ' (' + (a.entity === 'business' ? 'NOFA' : 'Personal') + ')</option>'; }).join('') + '</select></label></div>' +
+      '<div class="formrow formrow2">' +
+      '<label><span class="flabel">Date</span><input class="field" type="date" name="date" value="' + todayISO() + '" required></label>' +
+      '<label><span class="flabel">Amount</span><div class="moneyfield"><span>$</span><input class="field" name="amount" inputmode="decimal" placeholder="0.00" required></div></label></div>' +
+      '<label><span class="flabel">Status</span><select class="field" name="status"><option value="planned">Planned</option><option value="completed">Completed</option></select></label>' +
+      '<label><span class="flabel">Note</span><input class="field" name="note" placeholder="Optional"></label>' +
+      '<div class="mactions"><button type="button" class="btn ghost" data-action="close-modal">Cancel</button>' +
+      '<button class="btn primary">' + ic('plus', 15) + 'Add Transfer</button></div></form>');
+  } else if (m.type === 'add-build-spend') {
+    html = modalShell('Add Build Spend', 'Variable AI/Oz development spend \u2014 kept separate from fixed recurring subscriptions.',
+      '<form class="mform" data-form="add-build-spend">' +
+      '<div class="formrow formrow2">' +
+      '<label><span class="flabel">Date</span><input class="field" type="date" name="date" value="' + todayISO() + '" required></label>' +
+      '<label><span class="flabel">Amount</span><div class="moneyfield"><span>$</span><input class="field" name="amount" inputmode="decimal" placeholder="0.00" required></div></label></div>' +
+      '<label><span class="flabel">Vendor / description</span><input class="field" name="vendor" autofocus placeholder="e.g. Warp / Oz credits" required></label>' +
+      '<label><span class="flabel">Note</span><input class="field" name="note" placeholder="Optional"></label>' +
+      '<div class="mactions"><button type="button" class="btn ghost" data-action="close-modal">Cancel</button>' +
+      '<button class="btn primary">' + ic('plus', 15) + 'Add Spend</button></div></form>');
   }
   $id('modal-root').innerHTML = html;
 }
@@ -1719,22 +2295,22 @@ function bindEffects(anim) {
   var fc = document.querySelector('.fcwrap');
   if (fc) {
     var svg = fc.querySelector('svg');
-    var days = +fc.getAttribute('data-days'), start = +fc.getAttribute('data-start');
-    var G = fcGeom(days, start);
+    var days = +fc.getAttribute('data-days');
+    var G = fcGeom(days);
     var xl = fc.querySelector('.fc-x'), xd = fc.querySelector('.fc-dot'), tip = fc.querySelector('.fc-tip');
     svg.onmousemove = function (e) {
       var r = svg.getBoundingClientRect();
       var x = (e.clientX - r.left) / r.width * G.W;
       var i = Math.round(((x - G.PL) / (G.W - G.PL - G.PR)) * days);
       i = Math.max(0, Math.min(days, i));
-      var xi = G.X(i), yi = G.Y(G.s.bal[i]);
+      var xi = G.X(i), yi = G.Y(G.f.bal[i]);
       xl.setAttribute('x1', xi); xl.setAttribute('x2', xi); xl.style.display = '';
       xd.setAttribute('cx', xi); xd.setAttribute('cy', yi); xd.style.display = '';
-      var day = G.s.byDay[i];
+      var day = G.f.byDay[i];
       tip.style.display = 'block';
       tip.style.left = (xi / G.W * 100) + '%';
       tip.style.top = (yi / G.H * 100) + '%';
-      tip.innerHTML = '<b>' + dlabel(i) + '</b><p class="fm">' + money(G.s.bal[i], 0) + '</p>' +
+      tip.innerHTML = '<b>' + dlabel(i) + '</b><p class="fm">' + money(G.f.bal[i], 0) + '</p>' +
         (day ? '<p class="fd ' + (day > 0 ? 'pos' : 'neg') + '">' + (day > 0 ? '+' : '\u2212') + money(Math.abs(day)) + ' that day</p>' : '');
     };
     svg.onmouseleave = function () { xl.style.display = 'none'; xd.style.display = 'none'; tip.style.display = 'none'; };
@@ -1758,7 +2334,8 @@ var ACTIONS = {
   'seg': function (d, btn) {
     var wrap = btn.closest('.seg2');
     if (wrap) wrap.querySelectorAll('button').forEach(function (b) { b.classList.toggle('on', b.getAttribute('data-v') === d.v); });
-    var h = btn.closest('form') ? btn.closest('form').querySelector('input[name="entity"]') : null;
+    var parent = wrap ? wrap.parentElement : null;
+    var h = parent ? parent.querySelector('input[type="hidden"]') : null;
     if (h) h.value = d.v;
   },
   'ai-spend': function () { state.aiOpen = !state.aiOpen; render(false); },
@@ -1811,10 +2388,46 @@ var ACTIONS = {
     state.store.profile = { name: v, initials: (v[0] || 'N').toUpperCase() };
     persist(); toast('Profile saved'); render(false);
   },
+  'delete-transaction': function (d) {
+    var tx = state.store.transactions.filter(function (x) { return x.id === d.id; })[0]; if (!tx) return;
+    if (confirm('Delete transaction \u201c' + tx.name + '\u201d? This removes it from your history.')) {
+      reverseTransactionApply(tx);
+      state.store.transactions = state.store.transactions.filter(function (x) { return x.id !== d.id; });
+      persist(); toast('Transaction deleted', 'trash');
+      if (state.modal) closeModal(); render(false);
+    }
+  },
+  'delete-income': function (d) {
+    var s = state.store.incomeSources.filter(function (x) { return x.id === d.id; })[0]; if (!s) return;
+    if (confirm('Delete income source \u201c' + s.name + '\u201d?')) {
+      state.store.incomeSources = state.store.incomeSources.filter(function (x) { return x.id !== d.id; });
+      persist(); toast('Income source deleted', 'trash'); render(false);
+    }
+  },
+  'delete-owner-transfer': function (d) {
+    if (confirm('Delete this owner transfer?')) {
+      var t = state.store.ownerTransfers.filter(function (x) { return x.id === d.id; })[0];
+      if (t) reverseOwnerTransferApply(t);
+      state.store.ownerTransfers = state.store.ownerTransfers.filter(function (x) { return x.id !== d.id; });
+      persist(); toast('Owner transfer deleted', 'trash'); render(false);
+    }
+  },
+  'complete-owner-transfer': function (d) {
+    var t = state.store.ownerTransfers.filter(function (x) { return x.id === d.id; })[0]; if (!t) return;
+    t.status = 'completed'; t.updatedAt = new Date().toISOString();
+    applyOwnerTransferIfCompleted(t);
+    persist(); toast('Owner transfer marked completed'); render(false);
+  },
+  'delete-build-spend': function (d) {
+    if (confirm('Delete this build spend entry?')) {
+      state.store.buildSpend = state.store.buildSpend.filter(function (x) { return x.id !== d.id; });
+      persist(); toast('Build spend deleted', 'trash'); render(false);
+    }
+  },
   'export-csv': function () {
     downloadFile('nofa-transactions.csv',
-      ['Date,Name,Entity,Category,Amount'].concat(DATA.transactions.map(function (t) {
-        return t.date + ',"' + t.name + '",' + t.entity + ',' + t.cat + ',' + t.amount.toFixed(2);
+      ['Date,Name,Entity,Category,Amount,Status'].concat(state.store.transactions.map(function (t) {
+        return t.date + ',"' + t.name + '",' + t.entity + ',' + (t.category || '') + ',' + t.amount.toFixed(2) + ',' + (t.status || 'posted');
       })).join('\n'));
     toast('Transactions exported as CSV', 'download');
   },
@@ -1836,11 +2449,37 @@ var ACTIONS = {
   'cancel-reset': function () { state.confirmReset = false; render(false); }
 };
 
+function reportUiError(context, err) {
+  console.error(context, err);
+  var b = $id('errbar');
+  if (b) { b.style.display = 'flex'; b.querySelector('span').textContent = 'Error: ' + (err && err.message ? err.message : context); }
+}
 document.addEventListener('click', function (e) {
   var t = e.target.closest ? e.target.closest('[data-action]') : null;
   if (!t) return;
+  /* Respect data-stop boundaries (e.g. the modal box in modalShell()).
+     Any click that starts inside a data-stop container must not trigger
+     a data-action belonging to an ANCESTOR of that container (like the
+     modal-backdrop's close-modal) -- only data-action elements that are
+     inside (or are) the stop boundary itself may fire. This keeps clicks
+     on inputs/labels/selects/plain space inside a modal from bubbling out
+     and closing it, while clicking the backdrop itself, the X button, or
+     Cancel (all inside or at the boundary) still works. */
+  var stopBoundary = e.target.closest ? e.target.closest('[data-stop]') : null;
+  if (stopBoundary && !stopBoundary.contains(t)) return;
+  /* Belt-and-suspenders: the modal backdrop's close action must only ever
+     fire for a click that lands DIRECTLY on the backdrop itself, never one
+     that merely bubbled up from a descendant (a field, label, wrapper div,
+     etc.). This is stricter than -- and independent of -- the data-stop
+     containment check above, so no interior click can ever be misrouted
+     into closing the modal regardless of DOM nesting. */
+  if (t.getAttribute('data-backdrop') && e.target !== t) return;
   var fn = ACTIONS[t.getAttribute('data-action')];
-  if (fn) { e.preventDefault(); fn(t.dataset, t, e); }
+  if (fn) {
+    e.preventDefault();
+    try { fn(t.dataset, t, e); }
+    catch (err) { reportUiError('Action "' + t.getAttribute('data-action') + '" failed', err); }
+  }
 });
 
 document.addEventListener('input', function (e) {
@@ -1852,6 +2491,7 @@ document.addEventListener('submit', function (e) {
   var f = e.target.closest ? e.target.closest('[data-form]') : null;
   if (!f) return;
   e.preventDefault();
+  try {
   var data = {};
   new FormData(f).forEach(function (v, k) { data[k] = v; });
   var num = function (v) { return parseFloat(String(v).replace(/[^0-9.\-]/g, '')) || 0; };
@@ -1861,11 +2501,111 @@ document.addEventListener('submit', function (e) {
     closeModal(); render(false);
   } else if (type === 'edit-account') {
     var a = findAcct(f.getAttribute('data-id')); if (!a) return;
-    a.name = (data.name || '').trim() || a.name; a.balance = num(data.balance);
+    a.name = (data.name || '').trim() || a.name;
+    var newBal = num(data.balance);
+    /* Manually changing the balance here is a reconciliation: the new
+       value becomes authoritative and is logged so it can be audited
+       later; it must never be re-applied by the transaction engine. */
+    if (Math.abs(newBal - (a.balance != null ? a.balance : 0)) >= 0.005) {
+      var nowIsoRec = new Date().toISOString();
+      state.store.balanceReconciliations.push({
+        id: 'rec-' + Date.now(), accountId: a.id, previousBalance: a.balance, newBalance: newBal,
+        date: todayISO(), createdAt: nowIsoRec
+      });
+      a.lastReconciledAt = nowIsoRec;
+      a.balance = newBal;
+    }
     persist(); toast('Account updated'); closeModal(); render(false);
   } else if (type === 'add-income') {
-    state.store.incomeSources.push({ id: 'i' + Date.now(), name: (data.name || '').trim() || 'New source', display: (data.display || '').trim() || '\u2014', cadence: data.cadence || 'Monthly', note: (data.note || '').trim() || '\u2014', status: 'active' });
+    var cadenceDaysMap = { 'Monthly': 30, 'Biweekly': 14, 'Weekly': 7, 'One-off': null, 'Variable': null };
+    var cadenceVal = data.cadence || 'Monthly';
+    var cashStatus = data.cashStatus || 'expected';
+    state.store.incomeSources.push({
+      id: 'i' + Date.now(), name: (data.name || '').trim() || 'New source', display: (data.display || '').trim() || '\u2014',
+      cadence: cadenceVal, cadenceDays: cadenceDaysMap[cadenceVal] != null ? cadenceDaysMap[cadenceVal] : 30,
+      amount: num(data.amount), entity: data.entity || 'business', cashStatus: cashStatus,
+      nextDate: data.nextDate || null, note: (data.note || '').trim() || '\u2014', status: cashStatus === 'pipeline' ? 'planned' : 'active'
+    });
     persist(); toast('Income source \u201c' + esc((data.name || '').trim() || 'New source') + '\u201d added'); closeModal(); render(false);
+  } else if (type === 'edit-income') {
+    var inc2 = state.store.incomeSources.filter(function (x) { return x.id === f.getAttribute('data-id'); })[0]; if (!inc2) return;
+    var cadenceDaysMap2 = { 'Monthly': 30, 'Biweekly': 14, 'Weekly': 7, 'One-off': null, 'Variable': null };
+    inc2.name = (data.name || '').trim() || inc2.name;
+    inc2.display = (data.display || '').trim() || inc2.display;
+    /* Ranged sources submit amountLow/amountHigh instead of amount (see the
+       modal above) -- write those through and clear amount so it can never
+       shadow the range in monthlyIncomeBaseline(). Fixed sources keep using
+       the single amount field and have no range to clear. */
+    if (data.amountLow !== undefined && data.amountHigh !== undefined) {
+      inc2.amountLow = num(data.amountLow);
+      inc2.amountHigh = num(data.amountHigh);
+      inc2.amount = null;
+    } else {
+      inc2.amount = num(data.amount);
+    }
+    inc2.cadence = data.cadence || inc2.cadence;
+    inc2.cadenceDays = cadenceDaysMap2[data.cadence] != null ? cadenceDaysMap2[data.cadence] : inc2.cadenceDays;
+    inc2.cashStatus = data.cashStatus || inc2.cashStatus;
+    inc2.nextDate = data.nextDate || null;
+    inc2.note = (data.note || '').trim();
+    inc2.status = inc2.cashStatus === 'pipeline' ? 'planned' : 'active';
+    persist(); toast('Income source updated'); closeModal(); render(false);
+  } else if (type === 'add-transaction') {
+    var acc = findAcct(data.accountId) || state.store.accounts[0];
+    var amt = num(data.amount);
+    amt = data.txtype === 'expense' ? -Math.abs(amt) : Math.abs(amt);
+    var nowIsoTx = new Date().toISOString();
+    var newTx = {
+      id: 'tx-' + Date.now(), accountId: acc ? acc.id : null, date: data.date || todayISO(),
+      name: (data.name || '').trim() || 'Transaction', amount: amt, status: data.status === 'pending' ? 'pending' : 'posted',
+      entity: acc ? acc.entity : 'business', category: (data.category || '').trim(), expenseType: '',
+      clientProject: (data.clientProject || '').trim(), source: 'manual', notes: (data.notes || '').trim(),
+      icon: amt > 0 ? 'banknote' : 'card', includedInBalance: false, balanceApplied: false, reconciliationId: null,
+      createdAt: nowIsoTx, updatedAt: nowIsoTx
+    };
+    state.store.transactions.push(newTx);
+    computeTransactionApply(newTx, data.alreadyIncluded === '1');
+    persist(); toast('Transaction added'); closeModal(); render(false);
+  } else if (type === 'edit-transaction') {
+    var tx2 = state.store.transactions.filter(function (x) { return x.id === f.getAttribute('data-id'); })[0]; if (!tx2) return;
+    /* Reverse using the OLD accountId/amount before mutating fields, then
+       reapply using the NEW values -- a clean reverse-then-reapply so a
+       balance is never double-counted across an edit. */
+    reverseTransactionApply(tx2);
+    var acc2 = findAcct(data.accountId) || findAcct(tx2.accountId);
+    var amt2 = num(data.amount);
+    amt2 = data.txtype === 'expense' ? -Math.abs(amt2) : Math.abs(amt2);
+    tx2.accountId = acc2 ? acc2.id : tx2.accountId;
+    tx2.entity = acc2 ? acc2.entity : tx2.entity;
+    tx2.date = data.date || tx2.date;
+    tx2.amount = amt2;
+    tx2.name = (data.name || '').trim() || tx2.name;
+    tx2.status = data.status === 'pending' ? 'pending' : 'posted';
+    tx2.category = (data.category || '').trim();
+    tx2.clientProject = (data.clientProject || '').trim();
+    tx2.notes = (data.notes || '').trim();
+    tx2.updatedAt = new Date().toISOString();
+    computeTransactionApply(tx2, data.alreadyIncluded === '1');
+    persist(); toast('Transaction updated'); closeModal(); render(false);
+  } else if (type === 'add-owner-transfer') {
+    var fromAcc = findAcct(data.fromAccountId);
+    var toAcc = findAcct(data.toAccountId);
+    var dir = (fromAcc && fromAcc.entity === 'personal') ? 'personal_to_nofa' : 'nofa_to_personal';
+    var nowIsoOt = new Date().toISOString();
+    var newOt = {
+      id: 'ot-' + Date.now(), direction: dir, kind: dir === 'nofa_to_personal' ? 'withdrawal' : 'contribution',
+      amount: num(data.amount), fromAccountId: fromAcc ? fromAcc.id : null, toAccountId: toAcc ? toAcc.id : null,
+      date: data.date || todayISO(), status: data.status === 'completed' ? 'completed' : 'planned',
+      includedInBalance: false, balanceApplied: false,
+      note: (data.note || '').trim(), createdAt: nowIsoOt, updatedAt: nowIsoOt
+    };
+    state.store.ownerTransfers.push(newOt);
+    applyOwnerTransferIfCompleted(newOt);
+    persist(); toast('Owner transfer added'); closeModal(); render(false);
+  } else if (type === 'add-build-spend') {
+    var nowIsoBs = new Date().toISOString();
+    state.store.buildSpend.push({ id: 'bs-' + Date.now(), date: data.date || todayISO(), vendor: (data.vendor || '').trim() || 'Build spend', amount: num(data.amount), note: (data.note || '').trim(), createdAt: nowIsoBs, updatedAt: nowIsoBs });
+    persist(); toast('Build spend added'); closeModal(); render(false);
   } else if (type === 'add-expense') {
     var ent = data.entity === 'personal' ? 'personal' : 'business';
     var list = recurringList(ent);
@@ -1891,13 +2631,19 @@ document.addEventListener('submit', function (e) {
     persist(); toast('Expense updated'); closeModal(); render(false);
   } else if (type === 'edit-goal') {
     var g = findGoal(f.getAttribute('data-id')); if (!g) return;
-    g.current = num(data.current); g.target = num(data.target) || 1;
+    /* NOFA Protected Reserve's "current" is always derived by
+       syncReserveGoal() (called from persist() below) -- never accept a
+       manually-submitted value for it. Its field is disabled in the modal
+       so this normally never fires anyway; this is a defensive guard. */
+    if (!isNofaReserveGoal(g) && data.current !== undefined) g.current = num(data.current);
+    g.target = num(data.target) || 1;
     persist(); toast('Goal updated'); closeModal(); render(false);
   } else if (type === 'add-goal') {
     var name = (data.name || '').trim() || 'New Goal';
     state.store.goals.push({ id: 'g' + Date.now(), name: name, short: name.split(' ').slice(0, 2).join(' '), current: num(data.current), target: num(data.target) || 1, note: (data.note || '').trim() || 'Custom target', color: ['brand', 'grape', 'amber', 'teal'][state.store.goals.length % 4], mode: 'save' });
     persist(); toast('Goal \u201c' + esc(name) + '\u201d added'); closeModal(); render(false);
   }
+  } catch (err) { reportUiError('Saving "' + f.getAttribute('data-form') + '" failed', err); }
 });
 
 document.addEventListener('keydown', function (e) {
