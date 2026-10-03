@@ -614,6 +614,40 @@ function nextOccurrenceDate(day, fromDate) {
   if (cand < fromDate) cand = clamp(fromDate.getFullYear(), fromDate.getMonth() + 1);
   return cand;
 }
+/* ----------------------------------------------------------------
+   Completion-first recurrence math (Date-Aware Financial Engine).
+   addDaysISO/addMonthsClampedISO/advanceOccurrence are pure date
+   functions: given a RESOLVED occurrence's scheduled date, they return
+   the next scheduled date for that cadence. They never consult "today"
+   -- advancement only ever happens when explicitly called after a user
+   marks an occurrence paid/received/skipped, never from the passage of
+   time alone. Month/annual cadences always clamp from the stable
+   anchorDay (not from the previously clamped date) so short months
+   (e.g. Jan 31 -> Feb 28) never permanently drift the recurrence
+   (Mar still resolves back to 31). */
+function addDaysISO(iso, n) {
+  var d = parseISO(iso);
+  return isoOf(new Date(d.getFullYear(), d.getMonth(), d.getDate() + n));
+}
+function addMonthsClampedISO(iso, n, anchorDay) {
+  var d = parseISO(iso);
+  var targetIndex = d.getMonth() + n;
+  var y = d.getFullYear() + Math.floor(targetIndex / 12);
+  var m = ((targetIndex % 12) + 12) % 12;
+  var lastDay = new Date(y, m + 1, 0).getDate();
+  var day = Math.min(Math.max(1, anchorDay || d.getDate()), lastDay);
+  return isoOf(new Date(y, m, day));
+}
+function advanceOccurrence(fromISO, frequency, anchorDay) {
+  switch (frequency) {
+    case 'weekly': return addDaysISO(fromISO, 7);
+    case 'biweekly': return addDaysISO(fromISO, 14);
+    case 'quarterly': return addMonthsClampedISO(fromISO, 3, anchorDay);
+    case 'annual': return addMonthsClampedISO(fromISO, 12, anchorDay);
+    case 'monthly':
+    default: return addMonthsClampedISO(fromISO, 1, anchorDay);
+  }
+}
 var _uid = 0; var uid = function () { return 'u' + (_uid++); };
 function downloadFile(name, content, type) {
   var blob = new Blob([content], { type: type || 'text/csv' });
@@ -689,7 +723,7 @@ var STORE_KEY = 'nofa-prototype-v1';
    Business Market Rate Savings account below) that is NOT NOFA and must
    never be treated as NOFA cash. */
 var SEED = {
-  v: 5,
+  v: 6,
   profile: { name: 'Farhad', initials: 'FN' },
   settings: { weeklySummary: true, billReminders: true, reserveAlerts: true, showBanner: true },
   accounts: [
@@ -748,7 +782,12 @@ var SEED = {
     { id:'bs-2', date:'2026-09-11', vendor:'Hugging Face', amount:6.13, note:'', createdAt:'2026-09-11T12:00:00.000Z', updatedAt:'2026-09-11T12:00:00.000Z' }
   ],
   balanceSnapshots: [],
-  balanceReconciliations: []
+  balanceReconciliations: [],
+  /* Occurrence-state engine (Phase: Date-Aware Financial Engine): one
+     record per resolved (paid/received/skipped) recurring occurrence.
+     Never mutated in place -- undo removes the record and restores the
+     template's prior pendingOccurrence/lastProcessedOccurrence. */
+  occurrenceLog: []
 };
 
 var DATA = {
@@ -828,6 +867,13 @@ function firstAccountIdByEntity(store, entity) {
 }
 function migrateStore(oldStore, rawJson) {
   var oldVersion = oldStore.v;
+  /* 0) Never "migrate" data that is NEWER than this build understands --
+     that would silently downgrade/reinterpret fields a newer build wrote.
+     Leave it completely untouched and surface a warning instead. */
+  if (oldVersion != null && oldVersion > SEED.v) {
+    try { reportUiError('This data was saved by a newer app version \u2014 left untouched', new Error('store v' + oldVersion + ' > supported v' + SEED.v)); } catch (e) {}
+    return oldStore;
+  }
   /* 1) Back up the complete pre-migration state before touching anything. */
   try { localStorage.setItem(STORE_KEY + '-backup-v' + (oldVersion != null ? oldVersion : 'unknown') + '-' + Date.now(), rawJson); } catch (e) {}
   var before = { balance: sumBalances(oldStore), counts: countRecords(oldStore) };
@@ -863,6 +909,10 @@ function migrateStore(oldStore, rawJson) {
   });
   if (!Array.isArray(migrated.balanceReconciliations)) migrated.balanceReconciliations = [];
   if (!Array.isArray(migrated.balanceSnapshots)) migrated.balanceSnapshots = [];
+  /* Date-Aware Financial Engine (schema v6): occurrenceLog is purely
+     additive -- an empty array here never changes any existing balance,
+     count, or field, so it is safe to backfill before the verify step. */
+  if (!Array.isArray(migrated.occurrenceLog)) migrated.occurrenceLog = [];
   /* 3) Verify nothing was lost or altered before committing the migration. */
   var after = { balance: sumBalances(migrated), counts: countRecords(migrated) };
   var ok = Math.abs(after.balance - before.balance) < 0.005 &&
@@ -1007,6 +1057,48 @@ function ensureIncomeSourceIntegrity() {
   if (changed) persist();
 }
 ensureIncomeSourceIntegrity();
+/* ----------------------------------------------------------------
+   Date-Aware Financial Engine -- self-heal recurring expense templates
+   and income sources with the per-occurrence tracking fields (schema
+   v6). Runs on every load (same pattern as ensureRecurringIds() /
+   ensureIncomeSourceIntegrity() above), so it transparently backfills
+   data created before this feature existed as well as data created by
+   an older in-session code path. `pendingOccurrence` is the engine's
+   single authoritative "current cycle" date for a template -- it is
+   computed ONCE (here, or at creation time) and from then on only ever
+   changes when a user explicitly resolves (pays/receives/skips) that
+   exact occurrence; it is never silently recomputed from "today". */
+function ensureRecurringEngineFields() {
+  ['business','personal'].forEach(function (entity) {
+    var list = recurringList(entity);
+    var changed = false;
+    list.forEach(function (r) {
+      if (r.frequency === undefined) { r.frequency = 'monthly'; changed = true; }
+      if (r.lastProcessedOccurrence === undefined) { r.lastProcessedOccurrence = null; changed = true; }
+      if (r.pendingOccurrence === undefined) {
+        var anchorDay = parseInt(r.day, 10) || 1;
+        r.pendingOccurrence = isoOf(nextOccurrenceDate(anchorDay, todayBase()));
+        changed = true;
+      }
+    });
+    if (changed) persist();
+  });
+}
+ensureRecurringEngineFields();
+function ensureIncomeEngineFields() {
+  var changed = false;
+  (state.store.incomeSources || []).forEach(function (s) {
+    if (s.lastProcessedOccurrence === undefined) { s.lastProcessedOccurrence = null; changed = true; }
+    if (s.recurrenceAnchorDay === undefined) { s.recurrenceAnchorDay = s.nextDate ? parseISO(s.nextDate).getDate() : null; changed = true; }
+    /* nextDate is preserved VERBATIM, even if already in the past -- that
+       past date IS the real unresolved occurrence and must never be
+       silently snapped forward to "today" during backfill. */
+    if (s.pendingOccurrence === undefined) { s.pendingOccurrence = s.nextDate || null; changed = true; }
+  });
+  if (changed) persist();
+}
+ensureIncomeEngineFields();
+if (!Array.isArray(state.store.occurrenceLog)) { state.store.occurrenceLog = []; persist(); }
 
 /* ================================================================
    BALANCE SNAPSHOTS — one entry per calendar day, updated in place
@@ -1193,19 +1285,198 @@ function computeMonthlyCashflow(numMonths) {
 }
 
 /* ================================================================
-   OBLIGATIONS — derived from live, active recurring expenses
+   OCCURRENCE-STATE ENGINE (Date-Aware Financial Engine)
+   Architectural rule: Templates define recurrence. Occurrences define
+   obligation state. Transactions define actual money movement.
+   - A recurring expense/income TEMPLATE only ever describes the
+     recurrence rule (day-of-month / cadence).
+   - Each template's current obligation is a single persisted
+     `pendingOccurrence` ISO date -- the one occurrence currently open
+     (upcoming, due today, or past due). It is computed once and only
+     ever advances when a user explicitly resolves it; it is NEVER
+     recomputed from "today", so a missed cycle can never silently
+     disappear or roll forward on its own.
+   - Resolving an occurrence (paid/received) creates exactly one real
+     transaction via the existing computeTransactionApply engine (never
+     a second, parallel balance mutation) and appends an immutable
+     occurrenceLog record used for history + undo.
+================================================================ */
+function isRecurringActive(r) { return !r.status; }
+function isIncomeActiveForEngine(s) { return s.cashStatus !== 'pipeline'; }
+function incomeFrequencyOf(s) {
+  if (s.cadenceDays === 30) return 'monthly';
+  if (s.cadenceDays === 14) return 'biweekly';
+  if (s.cadenceDays === 7) return 'weekly';
+  return 'once';
+}
+function pendingExpenseOccurrenceISO(r) { return isRecurringActive(r) ? (r.pendingOccurrence || null) : null; }
+function pendingIncomeOccurrenceISO(s) { return isIncomeActiveForEngine(s) ? (s.pendingOccurrence || null) : null; }
+/* upcoming | due-today | past-due, purely from comparing a stored
+   occurrence date to today -- never mutates anything. */
+function occurrenceStatusFor(iso) {
+  if (!iso) return null;
+  var d = daysBetween(todayBase(), parseISO(iso));
+  if (d < 0) return 'past-due';
+  if (d === 0) return 'due-today';
+  return 'upcoming';
+}
+function findOccurrenceLogEntry(kind, itemId, scheduledDate) {
+  return (state.store.occurrenceLog || []).filter(function (o) { return o.kind === kind && o.itemId === itemId && o.scheduledDate === scheduledDate; })[0];
+}
+function pushOccurrenceLog(entry) {
+  if (!state.store.occurrenceLog) state.store.occurrenceLog = [];
+  state.store.occurrenceLog.push(entry);
+}
+/* action: 'paid' | 'skip'. Returns false (no-op) if there is nothing
+   pending, or if this exact occurrence was already resolved (duplicate
+   action / double-click guard) -- so retrying can never create a
+   second transaction or advance the cycle twice. */
+function resolveExpenseOccurrence(entity, itemId, action) {
+  var r = recurringItem(entity, itemId); if (!r) return false;
+  var pending = pendingExpenseOccurrenceISO(r); if (!pending) return false;
+  if (findOccurrenceLogEntry('expense', itemId, pending)) return false;
+  var anchorDay = parseInt(r.day, 10) || 1;
+  var freq = r.frequency || 'monthly';
+  var nowIso = new Date().toISOString();
+  var logEntry = {
+    id: 'oc-' + Date.now(), kind: 'expense', itemId: itemId, entity: entity,
+    scheduledDate: pending, status: action === 'skip' ? 'skipped' : 'paid',
+    actualDate: action === 'skip' ? null : todayISO(), amount: r.amount, txId: null,
+    completedAt: nowIso, previousPendingOccurrence: pending, previousLastProcessed: r.lastProcessedOccurrence || null
+  };
+  if (action !== 'skip') {
+    var amtInput = window.prompt('Actual amount paid for "' + r.name + '"?', r.amount != null ? r.amount.toFixed(2) : '0.00');
+    if (amtInput === null) return false;
+    var amt = parseFloat(String(amtInput).replace(/[^0-9.\-]/g, '')) || r.amount || 0;
+    var acct = findAcct(firstAccountIdByEntity(state.store, entity));
+    var newTx = {
+      id: 'tx-' + Date.now(), accountId: acct ? acct.id : null, date: todayISO(),
+      name: r.name, amount: -Math.abs(amt), status: 'posted', entity: entity,
+      category: r.category || '', expenseType: '', clientProject: '', source: 'recurring',
+      notes: 'Auto-recorded from recurring expense completion', icon: 'card',
+      includedInBalance: false, balanceApplied: false, reconciliationId: null,
+      recurringId: r.id, occurrenceDate: pending,
+      createdAt: nowIso, updatedAt: nowIso
+    };
+    state.store.transactions.push(newTx);
+    computeTransactionApply(newTx, false);
+    logEntry.amount = amt;
+    logEntry.txId = newTx.id;
+  }
+  pushOccurrenceLog(logEntry);
+  r.lastProcessedOccurrence = pending;
+  /* Completion-first: always advance from the SCHEDULED date, never from
+     today/actualDate -- paying early or late never shifts the cadence. */
+  r.pendingOccurrence = advanceOccurrence(pending, freq, anchorDay);
+  persist();
+  return true;
+}
+function undoExpenseOccurrence(entity, itemId) {
+  var r = recurringItem(entity, itemId); if (!r || !r.lastProcessedOccurrence) return false;
+  var log = findOccurrenceLogEntry('expense', itemId, r.lastProcessedOccurrence); if (!log) return false;
+  if (log.txId) {
+    var tx = state.store.transactions.filter(function (x) { return x.id === log.txId; })[0];
+    if (tx) { reverseTransactionApply(tx); state.store.transactions = state.store.transactions.filter(function (x) { return x.id !== log.txId; }); }
+  }
+  state.store.occurrenceLog = state.store.occurrenceLog.filter(function (o) { return o.id !== log.id; });
+  r.pendingOccurrence = log.previousPendingOccurrence;
+  r.lastProcessedOccurrence = log.previousLastProcessed || null;
+  persist();
+  return true;
+}
+function resolveIncomeOccurrence(itemId, action) {
+  var s = state.store.incomeSources.filter(function (x) { return x.id === itemId; })[0]; if (!s) return false;
+  var pending = pendingIncomeOccurrenceISO(s); if (!pending) return false;
+  if (findOccurrenceLogEntry('income', itemId, pending)) return false;
+  var freq = incomeFrequencyOf(s);
+  var anchorDay = s.recurrenceAnchorDay || parseISO(pending).getDate();
+  var nowIso = new Date().toISOString();
+  var logEntry = {
+    id: 'oc-' + Date.now(), kind: 'income', itemId: itemId, entity: s.entity,
+    scheduledDate: pending, status: action === 'skip' ? 'skipped' : 'received',
+    actualDate: action === 'skip' ? null : todayISO(), amount: s.amount, txId: null,
+    completedAt: nowIso, previousPendingOccurrence: pending, previousLastProcessed: s.lastProcessedOccurrence || null
+  };
+  if (action !== 'skip') {
+    var defaultAmt = s.amount != null ? s.amount : (s.amountLow != null && s.amountHigh != null ? (s.amountLow + s.amountHigh) / 2 : 0);
+    var amtInput = window.prompt('Actual amount received for "' + s.name + '"?', defaultAmt.toFixed(2));
+    if (amtInput === null) return false;
+    var amt = parseFloat(String(amtInput).replace(/[^0-9.\-]/g, '')) || defaultAmt;
+    var acct = findAcct(firstAccountIdByEntity(state.store, s.entity));
+    var newTx = {
+      id: 'tx-' + Date.now(), accountId: acct ? acct.id : null, date: todayISO(),
+      name: s.name, amount: Math.abs(amt), status: 'posted', entity: s.entity,
+      category: 'Income', expenseType: '', clientProject: '', source: 'recurring',
+      notes: 'Auto-recorded from income receipt', icon: 'banknote',
+      includedInBalance: false, balanceApplied: false, reconciliationId: null,
+      incomeSourceId: s.id, occurrenceDate: pending,
+      createdAt: nowIso, updatedAt: nowIso
+    };
+    state.store.transactions.push(newTx);
+    computeTransactionApply(newTx, false);
+    logEntry.amount = amt;
+    logEntry.txId = newTx.id;
+  }
+  pushOccurrenceLog(logEntry);
+  s.lastProcessedOccurrence = pending;
+  /* One-off/Variable sources (cadenceDays null) never generate a next
+     occurrence once resolved -- they are simply closed out. */
+  s.pendingOccurrence = freq === 'once' ? null : advanceOccurrence(pending, freq, anchorDay);
+  persist();
+  return true;
+}
+function undoIncomeOccurrence(itemId) {
+  var s = state.store.incomeSources.filter(function (x) { return x.id === itemId; })[0]; if (!s || !s.lastProcessedOccurrence) return false;
+  var log = findOccurrenceLogEntry('income', itemId, s.lastProcessedOccurrence); if (!log) return false;
+  if (log.txId) {
+    var tx = state.store.transactions.filter(function (x) { return x.id === log.txId; })[0];
+    if (tx) { reverseTransactionApply(tx); state.store.transactions = state.store.transactions.filter(function (x) { return x.id !== log.txId; }); }
+  }
+  state.store.occurrenceLog = state.store.occurrenceLog.filter(function (o) { return o.id !== log.id; });
+  s.pendingOccurrence = log.previousPendingOccurrence;
+  s.lastProcessedOccurrence = log.previousLastProcessed || null;
+  persist();
+  return true;
+}
+function overdueLiabilities() {
+  var list = [];
+  ['business','personal'].forEach(function (entity) {
+    recurringList(entity).filter(isRecurringActive).forEach(function (r) {
+      var iso = pendingExpenseOccurrenceISO(r);
+      if (iso && occurrenceStatusFor(iso) === 'past-due') list.push({ kind:'expense', itemId:r.id, entity:entity, name:r.name, amount:r.amount, scheduledDate:iso });
+    });
+  });
+  return list;
+}
+function overdueIncome() {
+  var list = [];
+  state.store.incomeSources.filter(isIncomeActiveForEngine).forEach(function (s) {
+    var iso = pendingIncomeOccurrenceISO(s);
+    if (iso && occurrenceStatusFor(iso) === 'past-due') list.push({ kind:'income', itemId:s.id, entity:s.entity, name:s.name, amount:s.amount, scheduledDate:iso, display:s.display, cashStatus:s.cashStatus });
+  });
+  return list;
+}
+
+/* ================================================================
+   OBLIGATIONS — derived from each recurring expense template's
+   single tracked pendingOccurrence (never from a blind "next day of
+   month after today" recomputation). Past-due occurrences are ALWAYS
+   included regardless of the forward-looking window, so an unresolved
+   bill can never silently disappear once its date passes.
 ================================================================ */
 function upcomingObligations(withinDays) {
-  var base = todayBase(), list = [];
+  var list = [];
   ['business','personal'].forEach(function (entity) {
-    recurringList(entity).filter(function (r) { return !r.status; }).forEach(function (r) {
-      var occ = nextOccurrenceDate(r.day, base);
-      var d = daysBetween(base, occ);
-      if (d >= 0 && d <= withinDays) {
+    recurringList(entity).filter(isRecurringActive).forEach(function (r) {
+      var iso = pendingExpenseOccurrenceISO(r); if (!iso) return;
+      var occ = parseISO(iso);
+      var d = daysBetween(todayBase(), occ);
+      if (d <= withinDays) {
         list.push({
           day: pad2(occ.getDate()), month: MONTHS[occ.getMonth()].toUpperCase(),
           name: r.name, sub: (entity === 'business' ? 'NOFA recurring' : 'Personal recurring') + (r.note ? ' \u00b7 ' + r.note : ''),
-          amount: r.amount, entity: entity, _d: d
+          amount: r.amount, entity: entity, _d: d, status: occurrenceStatusFor(iso),
+          itemId: r.id, scheduledDate: iso
         });
       }
     });
@@ -1218,21 +1489,27 @@ function upcomingObligations(withinDays) {
    KNOWN FORECAST (deterministic) —
    available cash - confirmed outflows - scheduled obligations
    + confirmed inflows = projected cleared cash.
-   Only forward-looking scheduled items are added; current account
-   balances are assumed to already reflect posted + pending activity,
-   so pending transactions are never subtracted a second time here.
+   Only forward-looking (d>=0) scheduled items are walked day-by-day;
+   current account balances are assumed to already reflect posted +
+   pending activity, so pending transactions are never subtracted a
+   second time here. Past-due unresolved items are intentionally NOT
+   injected into this day-indexed walk (mixing a negative-day "already
+   late" liability into a forward projection would be misleading) --
+   they remain visible as liabilities via overdueLiabilities()/
+   overdueIncome() and in upcomingObligations() instead.
 ================================================================ */
 function scheduledEvents(horizonDays) {
   var events = [], base = todayBase();
   ['business','personal'].forEach(function (entity) {
-    recurringList(entity).filter(function (r) { return !r.status; }).forEach(function (r) {
-      var occ = nextOccurrenceDate(r.day, base);
-      var d = daysBetween(base, occ);
+    recurringList(entity).filter(isRecurringActive).forEach(function (r) {
+      var iso = pendingExpenseOccurrenceISO(r); if (!iso) return;
+      var d = daysBetween(base, parseISO(iso));
       if (d >= 0 && d <= horizonDays) events.push({ d: d, amount: -Math.abs(r.amount), label: r.name, entity: entity, kind:'recurring' });
     });
   });
-  state.store.incomeSources.filter(function (s) { return s.cashStatus === 'confirmed' && s.nextDate; }).forEach(function (s) {
-    var occ = parseISO(s.nextDate), d = daysBetween(base, occ);
+  state.store.incomeSources.filter(function (s) { return isIncomeActiveForEngine(s) && s.cashStatus === 'confirmed'; }).forEach(function (s) {
+    var iso = pendingIncomeOccurrenceISO(s); if (!iso) return;
+    var d = daysBetween(base, parseISO(iso));
     if (d >= 0 && d <= horizonDays) events.push({ d: d, amount: Math.abs(s.amount || 0), label: s.name, entity: s.entity || 'business', kind:'income' });
   });
   state.store.ownerTransfers.filter(function (t) { return t.status === 'planned' && t.date; }).forEach(function (t) {
@@ -1250,8 +1527,14 @@ function computeKnownForecast(horizonDays) {
   var events = scheduledEvents(horizonDays);
   var byDay = {};
   events.forEach(function (e) { byDay[e.d] = (byDay[e.d] || 0) + e.amount; });
-  var bal = [start];
-  for (var d = 1; d <= horizonDays; d++) bal.push(bal[d - 1] + (byDay[d] || 0));
+  /* Fix: day-0 ("Due Today") events must affect the balance line exactly
+     like every other day, not just the inflow/outflow totals below --
+     previously bal[0] was pinned to `start` and the loop began at d=1,
+     so a same-day event was double-counted in the KPIs but invisible in
+     the chart/line. Starting the running total at d=0 keeps both
+     consistent. */
+  var bal = [], running = start;
+  for (var d = 0; d <= horizonDays; d++) { running += (byDay[d] || 0); bal.push(running); }
   var inflow = events.filter(function (e) { return e.amount > 0; }).reduce(function (s, e) { return s + e.amount; }, 0);
   var outflow = events.filter(function (e) { return e.amount < 0; }).reduce(function (s, e) { return s + Math.abs(e.amount); }, 0);
   return { start: start, events: events, byDay: byDay, bal: bal, inflow: inflow, outflow: outflow, net: inflow - outflow, end: bal[horizonDays] };
@@ -1368,7 +1651,7 @@ function fcGeom(days) {
 function forecastChartHTML(days) {
   var G = fcGeom(days), gid = uid();
   var line = G.f.bal.map(function (v, i) { return (i ? 'L' : 'M') + G.X(i).toFixed(1) + ' ' + G.Y(v).toFixed(1); }).join(' ');
-  var evs = G.f.events.filter(function (e) { return e.d >= 1 && e.d <= days && e.kind !== 'owner-transfer'; });
+  var evs = G.f.events.filter(function (e) { return e.d >= 0 && e.d <= days && e.kind !== 'owner-transfer'; });
   var ticks = [0, Math.round(days * .25), Math.round(days * .5), Math.round(days * .75), days];
   var grid = G.grid.map(function (v) {
     return '<line x1="' + G.PL + '" x2="' + (G.W - G.PR) + '" y1="' + G.Y(v).toFixed(1) + '" y2="' + G.Y(v).toFixed(1) + '" stroke="#EDF0F4"/>' +
@@ -1480,14 +1763,18 @@ function aiCard(rv) {
 function obligationsCard(rv) {
   var list = upcomingObligations(30);
   var sumT = list.reduce(function (s, o) { return s + o.amount; }, 0);
+  var overdueCount = list.filter(function (o) { return o.status === 'past-due'; }).length;
   return '<div class="card pad hfull fcol ' + rv + '">' +
-    cardHead('calendar', 'coral', 'Upcoming Obligations', list.length + ' items in 30 days \u00b7 ' + money(sumT) + ' total', viewAllBtn('recurring')) +
+    cardHead('calendar', 'coral', 'Upcoming Obligations', list.length + ' items \u00b7 ' + money(sumT) + ' total' + (overdueCount ? ' \u00b7 ' + overdueCount + ' past due' : ''), viewAllBtn('recurring')) +
     '<div class="rows">' + (list.length ? list.map(function (o) {
+      var statusChip = o.status === 'past-due' ? '<span class="chip coral">Past Due</span>'
+        : o.status === 'due-today' ? '<span class="chip amber">Due Today</span>'
+        : '<span class="chip ' + (o.entity === 'business' ? 'nofa' : 'personal') + '">' + (o.entity === 'business' ? 'NOFA' : 'Personal') + '</span>';
       return '<div class="rowitem"><div class="daybox"><p class="m">' + o.month + '</p><p class="d">' + o.day + '</p></div>' +
         '<div class="rowmain"><p class="rowt">' + esc(o.name) + '</p><p class="rowsub">' + esc(o.sub) + '</p></div>' +
-        '<span class="chip ' + (o.entity === 'business' ? 'nofa' : 'personal') + '">' + (o.entity === 'business' ? 'NOFA' : 'Personal') + '</span>' +
+        statusChip +
         '<p class="amt">' + money(o.amount) + '</p></div>';
-    }).join('') : '<p class="nomatch">Nothing scheduled in the next 30 days.</p>') + '</div></div>';
+    }).join('') : '<p class="nomatch">Nothing scheduled.</p>') + '</div></div>';
 }
 function transactionsCard(rv) {
   var rows = state.store.transactions.slice().sort(function (a, b) { return b.date.localeCompare(a.date) || String(b.id).localeCompare(String(a.id)); }).slice(0, 5);
@@ -1531,7 +1818,18 @@ function homeView(anim) {
   var initial = (st.profile.name || 'N')[0].toUpperCase();
   var f7 = computeKnownForecast(7);
   var plannedWithdrawal = st.ownerTransfers.filter(function (t) { return t.status === 'planned'; }).sort(function (a, b) { return a.date.localeCompare(b.date); })[0];
-  var nextIncome = st.incomeSources.filter(function (s) { return s.cashStatus !== 'pipeline' && s.nextDate; }).sort(function (a, b) { return a.nextDate.localeCompare(b.nextDate); })[0];
+  /* Date-Aware Financial Engine fix: pick the earliest tracked
+     pendingOccurrence (never a stale nextDate with no date filter) and
+     explicitly label it Overdue when its date has already passed,
+     instead of silently showing a past date as if it were still "Next". */
+  var nextIncomeCandidates = st.incomeSources.map(function (s) {
+    var iso = pendingIncomeOccurrenceISO(s);
+    return iso ? { source: s, iso: iso, status: occurrenceStatusFor(iso) } : null;
+  }).filter(Boolean).sort(function (a, b) { return a.iso.localeCompare(b.iso); });
+  var nextIncomeEntry = nextIncomeCandidates[0];
+  var nextIncome = nextIncomeEntry ? nextIncomeEntry.source : null;
+  var nextIncomeISO = nextIncomeEntry ? nextIncomeEntry.iso : null;
+  var nextIncomeOverdue = !!(nextIncomeEntry && nextIncomeEntry.status === 'past-due');
   var reserve = st.goals[0];
   var reservePct = Math.round(Math.min(reserve.current / Math.max(reserve.target, 1), 1) * 100);
   var bizTrend = entityTrend('business'), perTrend = entityTrend('personal');
@@ -1546,12 +1844,12 @@ function homeView(anim) {
     active.map(function (a) { return esc(a.name) + ' ' + money(a.balance); }).join(' \u00b7 ') + '</span></div>' +
     '<div style="font-size:11px;color:#64748B">' +
     (plannedWithdrawal ? 'Planned owner withdrawal: <b style="color:#101E33">' + money(plannedWithdrawal.amount) + '</b>' : 'No planned owner withdrawal') +
-    (nextIncome ? ' \u00b7 Next income: <b style="color:#101E33">' + esc(nextIncome.display) + ' on ' + fmtShort(nextIncome.nextDate) + '</b>' : '') +
+    (nextIncome ? ' \u00b7 ' + (nextIncomeOverdue ? 'Income overdue: <b style="color:#E85D75">' + esc(nextIncome.display) + ' was due ' + fmtShort(nextIncomeISO) + '</b>' : 'Next income: <b style="color:#101E33">' + esc(nextIncome.display) + ' on ' + fmtShort(nextIncomeISO) + '</b>') : '') +
     '</div></div></div>' +
     '<section class="kpis">' +
     kpi({ tint:'brand', icon:'wallet', label:'Total Available Cash', val:money(total), sub:'Across ' + active.length + ' accounts \u00b7 updates live', view:'accounts', rv:rv('d1') }) +
     kpi({ tint:'coral', icon:'calendar', label:'Next 7 Days', val:money(f7.outflow), sub:'Scheduled outflow \u00b7 ' + fmtShort(todayISO()) + '\u2013' + dlabel(7), view:'forecast', rv:rv('d1') }) +
-    kpi({ tint:'leaf', icon:'trend', label:'Next Income', val: nextIncome ? esc(nextIncome.display) : '\u2014', sub: nextIncome ? esc(nextIncome.name) + ' \u00b7 ' + fmtShort(nextIncome.nextDate) : 'None scheduled', view:'income', rv:rv('d2') }) +
+    kpi({ tint: nextIncomeOverdue ? 'coral' : 'leaf', icon:'trend', label: nextIncomeOverdue ? 'Income Overdue' : 'Next Income', val: nextIncome ? esc(nextIncome.display) : '\u2014', sub: nextIncome ? esc(nextIncome.name) + ' \u00b7 ' + fmtShort(nextIncomeISO) : 'None scheduled', view:'income', rv:rv('d2') }) +
     kpi({ tint:'grape', icon:'shield', label:'Overall Status', val: f7.end >= 0 ? 'Focused' : 'Attention', dot:true, sub:'Cash position ' + (f7.end >= 0 ? 'healthy' : 'tight') + ' \u00b7 reserve ' + reservePct + '%', view:'reports', rv:rv('d2') }) +
     '</section>' +
     '<section class="duo">' +
@@ -1712,13 +2010,21 @@ function transactionsView() {
    RECURRING VIEW
 ================================================================ */
 function recRow(i, entity) {
+  var active = !i.status;
+  var iso = active ? pendingExpenseOccurrenceISO(i) : null;
+  var occStatus = iso ? occurrenceStatusFor(iso) : null;
+  var occChip = occStatus === 'past-due' ? '<span class="chip coral">Past Due \u00b7 ' + fmtShort(iso) + '</span>'
+    : occStatus === 'due-today' ? '<span class="chip amber">Due Today</span>' : '';
   return '<div class="rowitem' + (i.status ? ' dimmed' : '') + '">' +
     '<span class="daychip">' + i.day + '</span>' +
     '<div class="rowmain"><p class="rowt">' + esc(i.name) + '</p>' +
     (i.note ? '<p class="rowsub">' + esc(i.note) + '</p>' : '') + '</div>' +
-    (i.status ? '<span class="chip ' + (i.status === 'canceled' ? 'coral' : 'muted') + '">' + (i.status === 'canceled' ? 'Canceled' : 'Inactive') + '</span>' : '') +
+    (i.status ? '<span class="chip ' + (i.status === 'canceled' ? 'coral' : 'muted') + '">' + (i.status === 'canceled' ? 'Canceled' : 'Inactive') + '</span>' : occChip) +
     '<p class="amt amtr">' + money(i.amount) + '</p>' +
     '<div style="display:flex;gap:5px;flex-shrink:0">' +
+      (active ? '<button class="act" data-action="mark-expense-paid" data-id="' + i.id + '" data-entity="' + entity + '" title="Mark paid">' + ic('check', 13) + '</button>' +
+      '<button class="act" data-action="skip-expense-occurrence" data-id="' + i.id + '" data-entity="' + entity + '" title="Skip this occurrence">' + ic('x', 13) + '</button>' +
+      (i.lastProcessedOccurrence ? '<button class="act" data-action="undo-expense-occurrence" data-id="' + i.id + '" data-entity="' + entity + '" title="Undo last resolution">' + ic('refresh', 13) + '</button>' : '') : '') +
       '<button class="act" data-action="modal" data-modal="edit-expense" data-id="' + i.id + '" data-entity="' + entity + '" title="Edit expense">' + ic('pencil', 13) + '</button>' +
       '<button class="act danger" data-action="delete-expense" data-id="' + i.id + '" data-entity="' + entity + '" title="Delete expense">' + ic('trash', 13) + '</button>' +
     '</div></div>';
@@ -1782,12 +2088,22 @@ function recurringView() {
 function incomeCardView(s) {
   var statusChip = s.cashStatus === 'confirmed' ? '<span class="chip leaf">Confirmed</span>' :
     s.cashStatus === 'expected' ? '<span class="chip amber">Expected</span>' : '<span class="chip muted">Pipeline</span>';
+  var active = isIncomeActiveForEngine(s);
+  var iso = active ? pendingIncomeOccurrenceISO(s) : null;
+  var occStatus = iso ? occurrenceStatusFor(iso) : null;
+  var occChip = occStatus === 'past-due' ? '<span class="chip coral">Overdue \u00b7 ' + fmtShort(iso) + '</span>'
+    : occStatus === 'due-today' ? '<span class="chip amber">Due Today</span>'
+    : (iso ? '<span class="chip muted">Next ' + fmtShort(iso) + '</span>' : (active ? '<span class="chip muted">Completed</span>' : ''));
   return '<div class="card pad fcol' + (s.cashStatus === 'pipeline' ? ' planned' : '') + '">' +
     '<div class="is-top"><span class="tile ' + (s.cashStatus === 'pipeline' ? 'slate' : 'leaf') + '">' + ic('banknote', 17) + '</span>' + statusChip + '</div>' +
     '<p class="is-name">' + esc(s.name) + '</p><p class="is-amt mono">' + esc(s.display) + '</p>' +
     '<p class="is-cad">' + esc(s.cadence) + '</p>' +
+    (occChip ? '<p style="margin-top:6px">' + occChip + '</p>' : '') +
     '<p class="is-note">' + ic('info', 14) + esc(s.note) + '</p>' +
-    '<div style="display:flex;gap:6px;margin-top:16px">' +
+    '<div style="display:flex;gap:6px;margin-top:16px;flex-wrap:wrap">' +
+    (active && iso ? '<button class="act" data-action="mark-income-received" data-id="' + s.id + '" title="Mark received">' + ic('check', 13) + 'Received</button>' +
+      '<button class="act" data-action="skip-income-occurrence" data-id="' + s.id + '" title="Skip this occurrence">' + ic('x', 13) + '</button>' +
+      (s.lastProcessedOccurrence ? '<button class="act" data-action="undo-income-occurrence" data-id="' + s.id + '" title="Undo last resolution">' + ic('refresh', 13) + '</button>' : '') : '') +
     '<button class="act" data-action="modal" data-modal="edit-income" data-id="' + s.id + '" title="Edit income source">' + ic('pencil', 13) + 'Edit</button>' +
     '<button class="act danger" data-action="delete-income" data-id="' + s.id + '" title="Delete income source">' + ic('trash', 13) + '</button>' +
     '</div></div>';
@@ -1796,7 +2112,14 @@ function incomeView() {
   var confirmed = state.store.incomeSources.filter(function (s) { return s.cashStatus === 'confirmed'; });
   var confirmedMonthly = confirmed.reduce(function (sum, s) { return sum + (s.amount || 0) * cadenceMonthlyFactor(s.cadenceDays); }, 0);
   var projectedBase = monthlyIncomeBaseline();
-  var nextUp = state.store.incomeSources.filter(function (s) { return s.cashStatus !== 'pipeline' && s.nextDate; }).sort(function (a, b) { return a.nextDate.localeCompare(b.nextDate); })[0];
+  var nextUpCandidates = state.store.incomeSources.map(function (s) {
+    var iso = pendingIncomeOccurrenceISO(s);
+    return iso ? { source: s, iso: iso, status: occurrenceStatusFor(iso) } : null;
+  }).filter(Boolean).sort(function (a, b) { return a.iso.localeCompare(b.iso); });
+  var nextUpEntry = nextUpCandidates[0];
+  var nextUp = nextUpEntry ? nextUpEntry.source : null;
+  var nextUpISO = nextUpEntry ? nextUpEntry.iso : null;
+  var nextUpOverdue = !!(nextUpEntry && nextUpEntry.status === 'past-due');
   return pageHeader('Income', null, 'Projected streams and their true cash status',
       '<button class="btn primary" data-action="modal" data-modal="add-income">' + ic('plus', 15) + 'Add Income Source</button>') +
     '<div class="stat3">' +
@@ -1806,7 +2129,7 @@ function incomeView() {
       ? money(projectedBase.low, 0) + ' \u2013 ' + money(projectedBase.high, 0)
       : '~' + money(projectedBase.mid, 0)) +
     '</p><p class="chead-s">Confirmed + expected recurring</p></div></div>' +
-    '<div class="stat" style="display:flex;align-items:center;gap:16px"><span class="tile grape">' + ic('clock', 17) + '</span><div class="minw0"><span class="flabel" style="margin-bottom:2px">Next expected</span><p class="sv">' + (nextUp ? fmtShort(nextUp.nextDate) : '\u2014') + '</p><p class="chead-s">' + (nextUp ? esc(nextUp.name) + ' \u00b7 ' + esc(nextUp.display) : 'None scheduled') + '</p></div></div>' +
+    '<div class="stat" style="display:flex;align-items:center;gap:16px"><span class="tile ' + (nextUpOverdue ? 'coral' : 'grape') + '">' + ic('clock', 17) + '</span><div class="minw0"><span class="flabel" style="margin-bottom:2px">' + (nextUpOverdue ? 'Overdue' : 'Next expected') + '</span><p class="sv">' + (nextUp ? fmtShort(nextUpISO) : '\u2014') + '</p><p class="chead-s">' + (nextUp ? esc(nextUp.name) + ' \u00b7 ' + esc(nextUp.display) : 'None scheduled') + '</p></div></div>' +
     '</div>' +
     '<div class="grid3">' + state.store.incomeSources.map(incomeCardView).join('') +
     '<div class="c12" style="grid-column:1/-1"><div class="card pad" style="background:linear-gradient(135deg,#FBF9FF,#F4F8FE)">' +
@@ -1822,7 +2145,7 @@ function forecastView() {
   var st = state.store;
   var h = state.horizon;
   var f = computeKnownForecast(h);
-  var evs = f.events.filter(function (e) { return e.d >= 1 && e.d <= h; });
+  var evs = f.events.filter(function (e) { return e.d >= 0 && e.d <= h; });
   var reserve = st.goals[0];
   var reservePct = Math.round(Math.min(reserve.current / Math.max(reserve.target, 1), 1) * 100);
   var planned = st.ownerTransfers.filter(function (t) { return t.status === 'planned'; }).sort(function (a, b) { return a.date.localeCompare(b.date); });
@@ -2404,6 +2727,28 @@ var ACTIONS = {
       persist(); toast('Income source deleted', 'trash'); render(false);
     }
   },
+  'mark-expense-paid': function (d) {
+    if (resolveExpenseOccurrence(d.entity || 'business', d.id, 'paid')) { toast('Expense marked paid'); render(false); }
+  },
+  'skip-expense-occurrence': function (d) {
+    if (confirm('Skip this occurrence? No transaction will be recorded, and it will not count as paid.')) {
+      if (resolveExpenseOccurrence(d.entity || 'business', d.id, 'skip')) { toast('Occurrence skipped'); render(false); }
+    }
+  },
+  'undo-expense-occurrence': function (d) {
+    if (undoExpenseOccurrence(d.entity || 'business', d.id)) { toast('Last occurrence undone'); render(false); }
+  },
+  'mark-income-received': function (d) {
+    if (resolveIncomeOccurrence(d.id, 'paid')) { toast('Income marked received'); render(false); }
+  },
+  'skip-income-occurrence': function (d) {
+    if (confirm('Skip this expected income occurrence? It will not count as received.')) {
+      if (resolveIncomeOccurrence(d.id, 'skip')) { toast('Occurrence skipped'); render(false); }
+    }
+  },
+  'undo-income-occurrence': function (d) {
+    if (undoIncomeOccurrence(d.id)) { toast('Last occurrence undone'); render(false); }
+  },
   'delete-owner-transfer': function (d) {
     if (confirm('Delete this owner transfer?')) {
       var t = state.store.ownerTransfers.filter(function (x) { return x.id === d.id; })[0];
@@ -2520,11 +2865,16 @@ document.addEventListener('submit', function (e) {
     var cadenceDaysMap = { 'Monthly': 30, 'Biweekly': 14, 'Weekly': 7, 'One-off': null, 'Variable': null };
     var cadenceVal = data.cadence || 'Monthly';
     var cashStatus = data.cashStatus || 'expected';
+    var newNextDate = data.nextDate || null;
     state.store.incomeSources.push({
       id: 'i' + Date.now(), name: (data.name || '').trim() || 'New source', display: (data.display || '').trim() || '\u2014',
       cadence: cadenceVal, cadenceDays: cadenceDaysMap[cadenceVal] != null ? cadenceDaysMap[cadenceVal] : 30,
       amount: num(data.amount), entity: data.entity || 'business', cashStatus: cashStatus,
-      nextDate: data.nextDate || null, note: (data.note || '').trim() || '\u2014', status: cashStatus === 'pipeline' ? 'planned' : 'active'
+      nextDate: newNextDate, note: (data.note || '').trim() || '\u2014', status: cashStatus === 'pipeline' ? 'planned' : 'active',
+      /* Date-Aware Financial Engine: seed the occurrence cursor from the
+         user-entered date immediately, so it never waits for a reload. */
+      lastProcessedOccurrence: null, pendingOccurrence: newNextDate,
+      recurrenceAnchorDay: newNextDate ? parseISO(newNextDate).getDate() : null
     });
     persist(); toast('Income source \u201c' + esc((data.name || '').trim() || 'New source') + '\u201d added'); closeModal(); render(false);
   } else if (type === 'edit-income') {
@@ -2546,7 +2896,16 @@ document.addEventListener('submit', function (e) {
     inc2.cadence = data.cadence || inc2.cadence;
     inc2.cadenceDays = cadenceDaysMap2[data.cadence] != null ? cadenceDaysMap2[data.cadence] : inc2.cadenceDays;
     inc2.cashStatus = data.cashStatus || inc2.cashStatus;
-    inc2.nextDate = data.nextDate || null;
+    var newNextDate2 = data.nextDate || null;
+    /* A hand-edited "Next expected date" is an explicit user correction --
+       resync the engine's pendingOccurrence cursor to match it (and
+       recompute the monthly anchor day) only when it actually changed, so
+       routine edits to other fields never disturb in-progress tracking. */
+    if (newNextDate2 !== inc2.nextDate) {
+      inc2.pendingOccurrence = newNextDate2;
+      inc2.recurrenceAnchorDay = newNextDate2 ? parseISO(newNextDate2).getDate() : null;
+    }
+    inc2.nextDate = newNextDate2;
     inc2.note = (data.note || '').trim();
     inc2.status = inc2.cashStatus === 'pipeline' ? 'planned' : 'active';
     persist(); toast('Income source updated'); closeModal(); render(false);
@@ -2617,13 +2976,26 @@ document.addEventListener('submit', function (e) {
       name: nm,
       amount: num(data.amount),
       status: data.status || '',
-      note: (data.note || '').trim()
+      note: (data.note || '').trim(),
+      /* Date-Aware Financial Engine: seed the occurrence cursor immediately
+         (relative to today, since this item did not exist before now) so
+         it is tracked correctly without waiting for a reload. */
+      frequency: 'monthly', lastProcessedOccurrence: null,
+      pendingOccurrence: isoOf(nextOccurrenceDate(parseInt(day, 10), todayBase()))
     });
     persist(); toast('Expense “' + esc(nm) + '” added'); closeModal(); render(false);
   } else if (type === 'edit-expense') {
     var ent2 = f.getAttribute('data-entity') || 'business';
     var ex2 = recurringItem(ent2, f.getAttribute('data-id')); if (!ex2) return;
-    ex2.day = String(Math.max(1, Math.min(31, parseInt(data.day, 10) || 1))).padStart(2, '0');
+    var newDay = String(Math.max(1, Math.min(31, parseInt(data.day, 10) || 1))).padStart(2, '0');
+    /* Changing the due day reschedules the template -- resync the pending
+       occurrence cursor relative to today. Leaving the day unchanged never
+       touches pendingOccurrence, so an in-progress (possibly past-due)
+       occurrence is never disturbed by unrelated edits. */
+    if (newDay !== ex2.day) {
+      ex2.pendingOccurrence = isoOf(nextOccurrenceDate(parseInt(newDay, 10), todayBase()));
+    }
+    ex2.day = newDay;
     ex2.name = (data.name || '').trim() || ex2.name;
     ex2.amount = num(data.amount);
     ex2.status = data.status || '';
